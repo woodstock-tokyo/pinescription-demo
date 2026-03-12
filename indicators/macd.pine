@@ -1,0 +1,15 @@
+// MACD — Moving Average Convergence Divergence
+// Trend-following momentum indicator.
+// MACD line crossing above signal = bullish; below = bearish.
+
+indicator("MACD", overlay=false)
+
+fast_length   = 12
+slow_length   = 26
+signal_length = 9
+
+[macdLine, signalLine, hist] = macd(close, fast_length, slow_length, signal_length)
+
+plot(macdLine,   "MACD",      color=#2196F3)
+plot(signalLine, "Signal",    color=#FF9800)
+plot(hist,       "Histogram", color=#4CAF50)

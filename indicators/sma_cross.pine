@@ -1,0 +1,14 @@
+// SMA Crossover Indicator
+// Plots a fast and slow Simple Moving Average
+// A cross of fast over slow is a bullish signal; slow over fast is bearish.
+
+indicator("SMA Cross", overlay=true)
+
+fast_length = 10
+slow_length = 30
+
+fast = sma(close, fast_length)
+slow = sma(close, slow_length)
+
+plot(fast, "Fast SMA", color=#2196F3)
+plot(slow, "Slow SMA", color=#FF5722)

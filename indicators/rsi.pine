@@ -1,0 +1,13 @@
+// RSI — Relative Strength Index
+// Classic momentum oscillator. Values above 70 = overbought, below 30 = oversold.
+
+indicator("RSI", overlay=false)
+
+length = 14
+
+r = rsi(close, length)
+
+plot(r, "RSI", color=#9C27B0)
+hline(70, "Overbought", color=#FF0000)
+hline(50, "Midline",    color=#888888)
+hline(30, "Oversold",   color=#00C853)
