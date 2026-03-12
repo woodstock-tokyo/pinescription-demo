@@ -4,9 +4,7 @@ A PineScript-style trading indicator demo built with Go + React.
 
 ## Overview
 
-This project demonstrates a PineScript-inspired DSL for defining technical indicators, powered by [`tsuz/go-pine`](https://github.com/tsuz/go-pine) on the backend and a React/TypeScript frontend with real-time charting.
-
-> **Note:** The backend is structured so that switching to [`woodstock-tokyo/pinescription`](https://github.com/woodstock-tokyo/pinescription) requires only a one-line change in `backend/go.mod`.
+This project demonstrates a PineScript-inspired DSL for defining technical indicators, powered by [`woodstock-tokyo/pinescription`](https://github.com/woodstock-tokyo/pinescription) on the backend and a React/TypeScript frontend with real-time charting.
 
 ## Architecture
 
