@@ -46,6 +46,107 @@ plot((high + low) / 2, title="manual_hl2")`
 	}
 }
 
+func TestEvalScriptSupportsOperatorExpressionsWithoutSpaces(t *testing.T) {
+	bars := testBars()
+	script := `indicator("Manual Mid", overlay=true)
+plot((high+low)/2, title="manual_hl2_no_spaces")`
+
+	plots, err := evalScript(script, bars)
+	if err != nil {
+		t.Fatalf("evalScript failed: %v", err)
+	}
+
+	pts, ok := plots["manual_hl2_no_spaces"]
+	if !ok {
+		t.Fatalf("expected plot 'manual_hl2_no_spaces', got keys: %v", mapKeys(plots))
+	}
+	if len(pts) != len(bars) {
+		t.Fatalf("expected %d points, got %d", len(bars), len(pts))
+	}
+
+	for i := range bars {
+		want := (bars[i].High + bars[i].Low) / 2
+		if !almostEqual(pts[i].Value, want) {
+			t.Fatalf("bar %d: expected %f, got %f", i, want, pts[i].Value)
+		}
+		if pts[i].Time != bars[i].Time {
+			t.Fatalf("bar %d: expected time %d, got %d", i, bars[i].Time, pts[i].Time)
+		}
+	}
+}
+
+func TestEvalScriptSupportsIndicatorAndPlotOnSameLine(t *testing.T) {
+	bars := testBars()
+	script := `indicator("Assigned", overlay=true); plot((close+high)/2, title="manual_ch2")`
+
+	plots, err := evalScript(script, bars)
+	if err != nil {
+		t.Fatalf("evalScript failed: %v", err)
+	}
+
+	pts, ok := plots["manual_ch2"]
+	if !ok {
+		t.Fatalf("expected plot 'manual_ch2', got keys: %v", mapKeys(plots))
+	}
+	if len(pts) != len(bars) {
+		t.Fatalf("expected %d points, got %d", len(bars), len(pts))
+	}
+
+	for i := range bars {
+		want := (bars[i].Close + bars[i].High) / 2
+		if !almostEqual(pts[i].Value, want) {
+			t.Fatalf("bar %d: expected %f, got %f", i, want, pts[i].Value)
+		}
+		if pts[i].Time != bars[i].Time {
+			t.Fatalf("bar %d: expected time %d, got %d", i, bars[i].Time, pts[i].Time)
+		}
+	}
+}
+
+func TestEvalScriptSupportsOHLCVIdentifiers(t *testing.T) {
+	bars := testBars()
+	script := `plot(open, title="open")
+plot(high, title="high")
+plot(low, title="low")
+plot(close, title="close")
+plot(volume, title="volume")`
+
+	plots, err := evalScript(script, bars)
+	if err != nil {
+		t.Fatalf("evalScript failed: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		want func(Bar) float64
+	}{
+		{name: "open", want: func(b Bar) float64 { return b.Open }},
+		{name: "high", want: func(b Bar) float64 { return b.High }},
+		{name: "low", want: func(b Bar) float64 { return b.Low }},
+		{name: "close", want: func(b Bar) float64 { return b.Close }},
+		{name: "volume", want: func(b Bar) float64 { return b.Volume }},
+	}
+
+	for _, tc := range cases {
+		pts, ok := plots[tc.name]
+		if !ok {
+			t.Fatalf("expected plot %q, got keys: %v", tc.name, mapKeys(plots))
+		}
+		if len(pts) != len(bars) {
+			t.Fatalf("plot %q: expected %d points, got %d", tc.name, len(bars), len(pts))
+		}
+		for i := range bars {
+			want := tc.want(bars[i])
+			if !almostEqual(pts[i].Value, want) {
+				t.Fatalf("plot %q bar %d: expected %f, got %f", tc.name, i, want, pts[i].Value)
+			}
+			if pts[i].Time != bars[i].Time {
+				t.Fatalf("plot %q bar %d: expected time %d, got %d", tc.name, i, bars[i].Time, pts[i].Time)
+			}
+		}
+	}
+}
+
 func TestEvalScriptSupportsHL2AndHLC3(t *testing.T) {
 	bars := testBars()
 	script := `plot(hl2, title="hl2")

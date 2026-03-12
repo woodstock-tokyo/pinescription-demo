@@ -1,4 +1,6 @@
 github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
+github.com/woodstock-tokyo/pinescription v0.0.0-20260227091603-b72b5baebf83 h1:bojGWRthX+ocnBEhyGRnAiYYx/q0N495pWvO1eugZ+k=
+github.com/woodstock-tokyo/pinescription v0.0.0-20260227091603-b72b5baebf83/go.mod h1:6acR6qEwNBb7lNlL4T1tPfT8uyDDkDn/2gAIXjHMT+M=
 gonum.org/v1/gonum v0.17.0 h1:VbpOemQlsSMrYmn7T2OUvQ4dqxQXU+ouZFQsZOx50z4=
 gonum.org/v1/gonum v0.17.0/go.mod h1:El3tOrEuMpv2UdMrbNlKEh9vd86bmQ6vqIcDwxEOc1E=

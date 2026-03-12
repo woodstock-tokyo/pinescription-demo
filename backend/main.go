@@ -323,14 +323,22 @@ func normalizeScript(script string) (string, error) {
 			continue
 		}
 
-		if startsWithCall(line, "indicator") {
+		stripped, strippedIndicator, err := stripLeadingCall(line, "indicator")
+		if err != nil {
+			return "", err
+		}
+		if strippedIndicator {
+			line = stripped
+		}
+		if line == "" || strings.HasPrefix(line, "//") {
 			continue
 		}
 
-		if rewritten, ok, err := rewritePlotLine(line); ok {
-			if err != nil {
-				return "", err
-			}
+		rewritten, changed, err := rewritePlotCalls(line)
+		if err != nil {
+			return "", err
+		}
+		if changed {
 			cleaned = append(cleaned, rewritten)
 			continue
 		}
@@ -345,6 +353,142 @@ func normalizeScript(script string) (string, error) {
 	return strings.Join(cleaned, "\n"), nil
 }
 
+func stripLeadingCall(line, name string) (string, bool, error) {
+	if !startsWithCall(line, name) {
+		return line, false, nil
+	}
+
+	openIdx := -1
+	for i := len(name); i < len(line); i++ {
+		if line[i] == '(' {
+			openIdx = i
+			break
+		}
+	}
+	if openIdx < 0 {
+		return "", true, fmt.Errorf("invalid %s(...) call", name)
+	}
+
+	closeIdx, err := findMatchingParen(line, openIdx)
+	if err != nil {
+		return "", true, err
+	}
+
+	remainder := strings.TrimSpace(line[closeIdx+1:])
+	if strings.HasPrefix(remainder, ";") {
+		remainder = strings.TrimSpace(remainder[1:])
+	}
+
+	return remainder, true, nil
+}
+
+func rewritePlotCalls(line string) (string, bool, error) {
+	rewritten := line
+	changed := false
+
+	for {
+		startIdx, openIdx, closeIdx, err := findTopLevelCall(rewritten, "plot")
+		if err != nil {
+			return "", changed, err
+		}
+		if startIdx < 0 {
+			break
+		}
+
+		replacement, err := rewritePlotInner(rewritten[openIdx+1 : closeIdx])
+		if err != nil {
+			return "", true, err
+		}
+
+		rewritten = rewritten[:startIdx] + replacement + rewritten[closeIdx+1:]
+		changed = true
+	}
+
+	return rewritten, changed, nil
+}
+
+func findTopLevelCall(s, name string) (startIdx, openIdx, closeIdx int, err error) {
+	parenDepth := 0
+	bracketDepth := 0
+	braceDepth := 0
+	var quote byte
+	escaped := false
+
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+
+		if ch == '\'' || ch == '"' {
+			quote = ch
+			continue
+		}
+
+		if parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 && strings.HasPrefix(s[i:], name) {
+			beforeOK := i == 0 || (!isIdentifierByte(s[i-1]) && s[i-1] != '.')
+			afterName := i + len(name)
+			afterOK := afterName >= len(s) || !isIdentifierByte(s[afterName])
+
+			if beforeOK && afterOK {
+				j := afterName
+				for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
+					j++
+				}
+				if j < len(s) && s[j] == '(' {
+					matchedClose, matchErr := findMatchingParen(s, j)
+					if matchErr != nil {
+						return -1, -1, -1, matchErr
+					}
+					return i, j, matchedClose, nil
+				}
+			}
+		}
+
+		switch ch {
+		case '(':
+			parenDepth++
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		case '[':
+			bracketDepth++
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case '{':
+			braceDepth++
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		}
+	}
+
+	return -1, -1, -1, nil
+}
+
+func isIdentifierByte(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') ||
+		(ch >= 'A' && ch <= 'Z') ||
+		(ch >= '0' && ch <= '9') ||
+		ch == '_'
+}
+
 func rewritePlotLine(line string) (string, bool, error) {
 	if !startsWithCall(line, "plot") {
 		return "", false, nil
@@ -355,14 +499,24 @@ func rewritePlotLine(line string) (string, bool, error) {
 		return "", true, err
 	}
 
+	rewritten, err := rewritePlotInner(inner)
+	if err != nil {
+		return "", true, err
+	}
+
+	return rewritten, true, nil
+}
+
+func rewritePlotInner(inner string) (string, error) {
+
 	args := splitTopLevel(inner, ',')
 	if len(args) == 0 {
-		return "", true, errors.New("plot() requires at least one argument")
+		return "", errors.New("plot() requires at least one argument")
 	}
 
 	expr := strings.TrimSpace(args[0])
 	if expr == "" {
-		return "", true, errors.New("plot() first argument cannot be empty")
+		return "", errors.New("plot() first argument cannot be empty")
 	}
 
 	titleArg := strconv.Quote(expr)
@@ -383,7 +537,7 @@ func rewritePlotLine(line string) (string, bool, error) {
 		}
 	}
 
-	return fmt.Sprintf("__plot_capture__(%s, %s, bar_index)", expr, titleArg), true, nil
+	return fmt.Sprintf("__plot_capture__(%s, %s, bar_index)", expr, titleArg), nil
 }
 
 func startsWithCall(line, name string) bool {
@@ -713,6 +867,32 @@ func toInt(v interface{}) (int, bool) {
 	}
 }
 
+var requiredOHLCVValueTypes = []string{"open", "high", "low", "close", "volume"}
+
+func ensureRequiredValueTypes(provider *barProvider, required []string) error {
+	valueTypes, err := provider.GetValuesTypes()
+	if err != nil {
+		return fmt.Errorf("get provider value types: %w", err)
+	}
+
+	available := make(map[string]struct{}, len(valueTypes))
+	for _, valueType := range valueTypes {
+		available[strings.ToLower(strings.TrimSpace(valueType))] = struct{}{}
+	}
+
+	for _, valueType := range required {
+		key := strings.ToLower(strings.TrimSpace(valueType))
+		if key == "" {
+			continue
+		}
+		if _, ok := available[key]; !ok {
+			return fmt.Errorf("market data provider missing required value_type %q", key)
+		}
+	}
+
+	return nil
+}
+
 func evalScript(script string, bs []Bar) (map[string][]PlotPoint, error) {
 	normalized, err := normalizeScript(script)
 	if err != nil {
@@ -720,6 +900,9 @@ func evalScript(script string, bs []Bar) (map[string][]PlotPoint, error) {
 	}
 
 	provider := newBarProvider("DEMO", bs)
+	if err := ensureRequiredValueTypes(provider, requiredOHLCVValueTypes); err != nil {
+		return nil, err
+	}
 	collector := newPlotCollector(bs)
 
 	engine := pine.NewEngine()
