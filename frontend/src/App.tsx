@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { WSClient } from './ws'
-import { Bar, ServerMsg, IndicatorScript } from './types'
+import { Bar, IndicatorScript } from './types'
 import { PRESETS } from './presets'
 import { useChart, getColourMap } from './useChart'
 
@@ -38,9 +38,7 @@ export default function App() {
     const ws = new WSClient(wsUrl())
     wsRef.current = ws
 
-    const off = ws.on((raw) => {
-      const msg = raw as ServerMsg & { type: string }
-
+    const off = ws.on((msg) => {
       if (msg.type === '__connected')   { setConnected(true);  return }
       if (msg.type === '__disconnected'){ setConnected(false); return }
 

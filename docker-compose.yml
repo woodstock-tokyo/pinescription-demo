@@ -3,6 +3,8 @@ services:
   backend:
     build:
       context: ./backend
+      ssh:
+        - default
     container_name: pinescription-backend
     restart: unless-stopped
     ports:
