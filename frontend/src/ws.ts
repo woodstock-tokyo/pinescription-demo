@@ -1,6 +1,11 @@
 import { ServerMsg, ClientMsg } from './types'
 
-type Handler = (msg: ServerMsg) => void
+type ConnectionEvent =
+  | { type: '__connected' }
+  | { type: '__disconnected' }
+
+type InboundMsg = ServerMsg | ConnectionEvent
+type Handler = (msg: InboundMsg) => void
 
 export class WSClient {
   private ws:    WebSocket | null = null
@@ -17,13 +22,13 @@ export class WSClient {
 
     this.ws.onopen = () => {
       this._connected = true
-      this.emit({ type: '__connected' } as unknown as ServerMsg)
+      this.emit({ type: '__connected' })
     }
 
     this.ws.onmessage = (ev: MessageEvent) => {
       try {
         const msg = JSON.parse(ev.data as string) as ServerMsg
-        this.handlers.forEach(h => h(msg))
+        this.emit(msg)
       } catch (e) {
         console.error('[ws] parse error', e)
       }
@@ -31,14 +36,14 @@ export class WSClient {
 
     this.ws.onclose = () => {
       this._connected = false
-      this.emit({ type: '__disconnected' } as unknown as ServerMsg)
+      this.emit({ type: '__disconnected' })
       this.timer = setTimeout(() => this.connect(), 2500)
     }
 
     this.ws.onerror = () => { /* close fires too */ }
   }
 
-  private emit(msg: ServerMsg) {
+  private emit(msg: InboundMsg) {
     this.handlers.forEach(h => h(msg))
   }
 

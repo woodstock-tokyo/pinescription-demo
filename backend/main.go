@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -14,14 +15,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	pine "github.com/tsuz/go-pine/pine"
+	pine "github.com/woodstock-tokyo/pinescription"
+	pseries "github.com/woodstock-tokyo/pinescription/series"
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Domain types
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Bar is a single OHLCV candle sent to the browser.
 type Bar struct {
 	Time   int64   `json:"time"`
 	Open   float64 `json:"open"`
@@ -31,813 +28,834 @@ type Bar struct {
 	Volume float64 `json:"volume"`
 }
 
-// IndicatorScript is a named PineScript program stored server-side.
 type IndicatorScript struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	Script string `json:"script"`
 }
 
-// PlotPoint is one named plot value at a given timestamp.
 type PlotPoint struct {
 	Time  int64   `json:"time"`
 	Value float64 `json:"value"`
 }
 
-// IndicatorOutput is returned to the browser after evaluating a script.
 type IndicatorOutput struct {
 	IndicatorID string                 `json:"indicator_id"`
 	Name        string                 `json:"name"`
 	Plots       map[string][]PlotPoint `json:"plots"`
 }
 
-// IndicatorUpdate is a lightweight per-bar update for all active indicators.
 type IndicatorUpdate struct {
 	IndicatorID string             `json:"indicator_id"`
 	Name        string             `json:"name"`
 	Values      map[string]float64 `json:"values"`
 }
 
-// WSEnvelope is the top-level WebSocket message wrapper.
 type WSEnvelope struct {
 	Type             string            `json:"type"`
-	Bars             []Bar             `json:"bars,omitempty"`
 	Bar              *Bar              `json:"bar,omitempty"`
-	IndicatorUpdates []IndicatorUpdate `json:"indicator_updates,omitempty"`
-	IndicatorOutput  *IndicatorOutput  `json:"indicator_output,omitempty"`
+	Bars             []Bar             `json:"bars,omitempty"`
+	Indicator        *IndicatorScript  `json:"indicator,omitempty"`
 	IndicatorID      string            `json:"indicator_id,omitempty"`
+	IndicatorOutput  *IndicatorOutput  `json:"indicator_output,omitempty"`
+	IndicatorUpdates []IndicatorUpdate `json:"indicator_updates,omitempty"`
+	ID               string            `json:"id,omitempty"`
 	Error            string            `json:"error,omitempty"`
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Server state
-// ─────────────────────────────────────────────────────────────────────────────
-
 var (
-	barsMu     sync.RWMutex
-	bars       []Bar
-	indMu      sync.RWMutex
+	bars   []Bar
+	barsMu sync.RWMutex
+
 	indicators = map[string]*IndicatorScript{}
-	clientsMu  sync.RWMutex
-	clients    = map[*websocket.Conn]bool{}
+	indMu      sync.RWMutex
+
+	clients   = map[*websocket.Conn]bool{}
+	clientsMu sync.RWMutex
+
+	upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin:     func(_ *http.Request) bool { return true },
+	}
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
-	CheckOrigin:     func(r *http.Request) bool { return true },
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Market data simulation
-// ─────────────────────────────────────────────────────────────────────────────
-
-func r2(v float64) float64 { return math.Round(v*100) / 100 }
-
 func seedHistory(n int) []Bar {
-	rng := rand.New(rand.NewSource(42))
+	if n < 2 {
+		n = 2
+	}
 	out := make([]Bar, 0, n)
-	price := 65000.0
-	now := time.Now().UTC().Truncate(time.Minute)
-	start := now.Add(-time.Duration(n) * time.Minute)
+	px := 45000.0
+	t := time.Now().UTC().Add(-time.Duration(n) * time.Minute)
+
 	for i := 0; i < n; i++ {
-		t := start.Add(time.Duration(i) * time.Minute)
-		o := price
-		chg := (rng.Float64()*2 - 1) * price * 0.004
-		c := r2(o + chg)
-		h := r2(math.Max(o, c) + rng.Float64()*price*0.002)
-		l := r2(math.Min(o, c) - rng.Float64()*price*0.002)
-		v := r2(rng.Float64()*15 + 1)
-		out = append(out, Bar{Time: t.Unix(), Open: r2(o), High: h, Low: l, Close: c, Volume: v})
-		price = c
+		open := px
+		move := (rand.Float64() - 0.5) * 320.0
+		close := math.Max(100, open+move)
+		high := math.Max(open, close) + rand.Float64()*90.0
+		low := math.Min(open, close) - rand.Float64()*90.0
+		if low < 0 {
+			low = 0
+		}
+		volume := 100 + rand.Float64()*900
+
+		out = append(out, Bar{
+			Time:   t.Unix(),
+			Open:   open,
+			High:   high,
+			Low:    low,
+			Close:  close,
+			Volume: volume,
+		})
+
+		px = close
+		t = t.Add(time.Minute)
 	}
+
 	return out
 }
 
-func nextBar(prev Bar, rng *rand.Rand) Bar {
-	o := prev.Close
-	chg := (rng.Float64()*2 - 1) * o * 0.004
-	c := r2(o + chg)
-	h := r2(math.Max(o, c) + rng.Float64()*o*0.002)
-	l := r2(math.Min(o, c) - rng.Float64()*o*0.002)
-	v := r2(rng.Float64()*15 + 1)
-	return Bar{Time: prev.Time + 60, Open: r2(o), High: h, Low: l, Close: c, Volume: v}
+func nextBar(prev Bar) Bar {
+	open := prev.Close
+	move := (rand.Float64() - 0.5) * 260.0
+	close := math.Max(100, open+move)
+	high := math.Max(open, close) + rand.Float64()*70.0
+	low := math.Min(open, close) - rand.Float64()*70.0
+	if low < 0 {
+		low = 0
+	}
+	volume := 100 + rand.Float64()*900
+
+	return Bar{
+		Time:   prev.Time + 60,
+		Open:   open,
+		High:   high,
+		Low:    low,
+		Close:  close,
+		Volume: volume,
+	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// go-pine bridge
-// ─────────────────────────────────────────────────────────────────────────────
-
-// barsToOHLCV converts our Bar slice to go-pine's OHLCV slice.
-func barsToOHLCV(bs []Bar) []pine.OHLCV {
-	out := make([]pine.OHLCV, len(bs))
-	for i, b := range bs {
-		out[i] = pine.OHLCV{
-			O: b.Open, H: b.High, L: b.Low, C: b.Close, V: b.Volume,
-			S: time.Unix(b.Time, 0).UTC(),
-		}
-	}
-	return out
+type barProvider struct {
+	symbol    string
+	bars      []Bar
+	timeframe string
+	session   string
 }
 
-// collectSeries walks the OHLCVSeries in order and, for each bar time,
-// looks up the ValueSeries value using SetCurrent+Val.
-// This is the correct pattern for go-pine: Value fields are unexported;
-// the only public accessor is ValueSeries.Val() which returns the *current* value.
-func collectSeries(vs pine.ValueSeries, bs []Bar) []PlotPoint {
-	var pts []PlotPoint
-	for _, b := range bs {
-		t := time.Unix(b.Time, 0).UTC()
-		if vs.SetCurrent(t) {
-			if val := vs.Val(); val != nil && !math.IsNaN(*val) && !math.IsInf(*val, 0) {
-				pts = append(pts, PlotPoint{Time: b.Time, Value: r2(*val)})
-			}
-		}
+func newBarProvider(symbol string, bs []Bar) *barProvider {
+	if symbol == "" {
+		symbol = "DEMO"
 	}
-	return pts
+	return &barProvider{
+		symbol:    symbol,
+		bars:      bs,
+		timeframe: "1",
+		session:   "regular",
+	}
 }
 
-// latestVal returns only the last value in a ValueSeries for the given bars.
-func latestVal(vs pine.ValueSeries, bs []Bar) (float64, bool) {
-	if len(bs) == 0 {
-		return 0, false
-	}
-	t := time.Unix(bs[len(bs)-1].Time, 0).UTC()
-	if vs.SetCurrent(t) {
-		if val := vs.Val(); val != nil && !math.IsNaN(*val) && !math.IsInf(*val, 0) {
-			return r2(*val), true
-		}
-	}
-	return 0, false
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PineScript evaluator
-// ─────────────────────────────────────────────────────────────────────────────
-
-// evalScript parses a PineScript-like program and evaluates it over the given
-// bars using the go-pine / pinescription library.
-// Returns a map of plot-name → time-series of PlotPoints.
-func evalScript(script string, bs []Bar) (map[string][]PlotPoint, error) {
-	if len(bs) == 0 {
-		return nil, fmt.Errorf("no bars provided")
-	}
-
-	ohlcvs := barsToOHLCV(bs)
-	series, err := pine.NewOHLCVSeries(ohlcvs)
-	if err != nil {
-		return nil, fmt.Errorf("NewOHLCVSeries: %w", err)
-	}
-
-	// Advance the series to the end so all indicator caches are populated.
-	for {
-		v, err := series.Next()
-		if err != nil {
-			return nil, fmt.Errorf("series.Next: %w", err)
-		}
-		if v == nil {
-			break
-		}
-	}
-
-	// Parse and evaluate the script.
-	namedSeries, err := parsePinePlots(script, series)
+func (p *barProvider) GetSeries(seriesKey string) (pine.SeriesExtended, error) {
+	symbol, valueType, err := parseSeriesKey(seriesKey)
 	if err != nil {
 		return nil, err
 	}
-
-	result := make(map[string][]PlotPoint)
-	for name, vs := range namedSeries {
-		result[name] = collectSeries(vs, bs)
+	if symbol != p.symbol {
+		return nil, fmt.Errorf("unknown symbol: %s", symbol)
 	}
-	return result, nil
+
+	size := len(p.bars)
+	if size < 1 {
+		size = 1
+	}
+	q := pseries.NewQueue(size)
+	for _, b := range p.bars {
+		v, err := valueFromBar(b, valueType)
+		if err != nil {
+			return nil, err
+		}
+		q.Update(v)
+	}
+	return q, nil
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PineScript DSL parser / evaluator
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Supported PineScript v5 subset:
-//
-//   indicator("title", overlay=true)
-//
-//   // variable assignment
-//   myVar = ta.sma(close, 20)
-//   [macdLine, signal, hist] = ta.macd(close, 12, 26, 9)
-//   [mid, upper, lower] = ta.bb(close, 20, 2.0)
-//   [mid, upper, lower] = ta.kc(close, 20, 1.5)
-//   [adx, diPlus, diMinus] = ta.dmi(14, 14)
-//
-//   // plots
-//   plot(myVar, title="SMA 20")
-//   plot(ta.rsi(close, 14), title="RSI")
-//
-// Supported ta.* functions:
-//   ta.sma, ta.ema, ta.rma, ta.rsi, ta.macd, ta.bb / ta.bbands,
-//   ta.atr, ta.cci, ta.mfi, ta.dmi, ta.kc, ta.stdev, ta.variance,
-//   ta.roc, ta.change
-
-type evalContext struct {
-	series pine.OHLCVSeries
-	vars   map[string]pine.ValueSeries
+func (p *barProvider) GetSymbols() ([]string, error) {
+	return []string{p.symbol}, nil
 }
 
-func newEvalContext(series pine.OHLCVSeries) *evalContext {
-	return &evalContext{series: series, vars: make(map[string]pine.ValueSeries)}
+func (p *barProvider) GetValuesTypes() ([]string, error) {
+	return []string{"open", "high", "low", "close", "volume", "hl2", "hlc3"}, nil
 }
 
-func parsePinePlots(script string, series pine.OHLCVSeries) (map[string]pine.ValueSeries, error) {
-	ctx := newEvalContext(series)
-	plots := make(map[string]pine.ValueSeries)
-
-	for _, rawLine := range strings.Split(script, "\n") {
-		line := strings.TrimSpace(rawLine)
-		if line == "" || strings.HasPrefix(line, "//") || strings.HasPrefix(line, "indicator(") {
-			continue
-		}
-
-		// plot(expr, title="Name", ...)
-		if strings.HasPrefix(line, "plot(") {
-			name, vs, err := parsePlotLine(line, ctx)
-			if err != nil {
-				return nil, fmt.Errorf("plot() error: %w", err)
-			}
-			if vs != nil {
-				plots[name] = vs
-			}
-			continue
-		}
-
-		// Multi-return: [a, b, c] = ta.func(...)
-		if strings.HasPrefix(line, "[") {
-			if err := parseMultiAssign(line, ctx); err != nil {
-				return nil, fmt.Errorf("multi-assign %q: %w", line, err)
-			}
-			continue
-		}
-
-		// Single assignment
-		if isAssignment(line) {
-			if err := parseSingleAssign(line, ctx); err != nil {
-				return nil, fmt.Errorf("assign %q: %w", line, err)
-			}
-		}
-	}
-
-	// Auto-plot all variables if no explicit plot() calls.
-	if len(plots) == 0 {
-		for name, vs := range ctx.vars {
-			plots[name] = vs
-		}
-	}
-	return plots, nil
-}
-
-// isAssignment returns true if line contains a bare = (not ==, !=, <=, >=, :=).
-func isAssignment(line string) bool {
-	for i := 0; i < len(line); i++ {
-		if line[i] == '=' {
-			if i > 0 {
-				p := line[i-1]
-				if p == '!' || p == '<' || p == '>' || p == '=' || p == ':' {
-					continue
-				}
-			}
-			if i+1 < len(line) && line[i+1] == '=' {
-				continue
-			}
-			return true
-		}
-	}
-	return false
-}
-
-func parsePlotLine(line string, ctx *evalContext) (string, pine.ValueSeries, error) {
-	inner := extractBetweenParens(line[4:]) // "plot" is 4 chars
-	args := splitTopLevel(inner, ',')
-	if len(args) == 0 {
-		return "", nil, fmt.Errorf("empty plot()")
-	}
-	expr := strings.TrimSpace(args[0])
-	name := expr
-	for _, arg := range args[1:] {
-		arg = strings.TrimSpace(arg)
-		if strings.HasPrefix(arg, "title=") {
-			t := strings.Trim(strings.TrimPrefix(arg, "title="), `"' `)
-			if t != "" {
-				name = t
-			}
-		}
-	}
-	vs, err := evalExpr(expr, ctx)
-	if err != nil {
-		return "", nil, err
-	}
-	return name, vs, nil
-}
-
-func parseMultiAssign(line string, ctx *evalContext) error {
-	end := strings.Index(line, "]")
-	if end < 0 {
-		return fmt.Errorf("missing ]")
-	}
-	names := strings.Split(line[1:end], ",")
-	for i := range names {
-		names[i] = strings.TrimSpace(names[i])
-	}
-	rest := strings.TrimSpace(line[end+1:])
-	rest = strings.TrimPrefix(rest, ":=")
-	rest = strings.TrimPrefix(rest, "=")
-	rest = strings.TrimSpace(rest)
-
-	results, err := evalMultiExpr(rest, ctx)
-	if err != nil {
-		return err
-	}
-	for i, name := range names {
-		if i < len(results) && name != "_" && name != "" {
-			ctx.vars[name] = results[i]
-		}
-	}
-	return nil
-}
-
-func parseSingleAssign(line string, ctx *evalContext) error {
-	eqIdx := -1
-	for i := 0; i < len(line); i++ {
-		if line[i] == '=' {
-			if i > 0 {
-				p := line[i-1]
-				if p == '!' || p == '<' || p == '>' || p == '=' || p == ':' {
-					continue
-				}
-			}
-			if i+1 < len(line) && line[i+1] == '=' {
-				continue
-			}
-			eqIdx = i
-			break
-		}
-	}
-	if eqIdx < 0 {
+func (p *barProvider) SetTimeframe(tf string) error {
+	tf = strings.TrimSpace(tf)
+	if tf == "" {
 		return nil
 	}
-	lhs := strings.TrimSpace(line[:eqIdx])
-	lhs = strings.TrimSuffix(lhs, ":")
-	lhs = strings.TrimPrefix(lhs, "var float ")
-	lhs = strings.TrimPrefix(lhs, "float ")
-	lhs = strings.TrimPrefix(lhs, "var ")
-	rhs := strings.TrimSpace(line[eqIdx+1:])
-
-	vs, err := evalExpr(rhs, ctx)
-	if err != nil {
-		return err
-	}
-	if vs != nil {
-		ctx.vars[lhs] = vs
-	}
+	p.timeframe = tf
 	return nil
 }
 
-// evalExpr evaluates a single-value expression.
-func evalExpr(expr string, ctx *evalContext) (pine.ValueSeries, error) {
-	expr = strings.TrimSpace(expr)
-
-	// Variable reference
-	if vs, ok := ctx.vars[expr]; ok {
-		return vs, nil
+func (p *barProvider) GetTimeframe() string {
+	if p.timeframe == "" {
+		return "1"
 	}
-
-	// Source series
-	switch expr {
-	case "close":
-		return pine.OHLCVAttr(ctx.series, pine.OHLCPropClose), nil
-	case "open":
-		return pine.OHLCVAttr(ctx.series, pine.OHLCPropOpen), nil
-	case "high":
-		return pine.OHLCVAttr(ctx.series, pine.OHLCPropHigh), nil
-	case "low":
-		return pine.OHLCVAttr(ctx.series, pine.OHLCPropLow), nil
-	case "volume":
-		return pine.OHLCVAttr(ctx.series, pine.OHLCPropVolume), nil
-	case "hl2":
-		return pine.OHLCVAttr(ctx.series, pine.OHLCPropHL2), nil
-	case "hlc3":
-		return pine.OHLCVAttr(ctx.series, pine.OHLCPropHLC3), nil
-	}
-
-	// ta.xxx(...) call
-	if strings.HasPrefix(expr, "ta.") {
-		return evalTACall(expr, ctx)
-	}
-
-	// Numeric literal
-	if f, err := strconv.ParseFloat(expr, 64); err == nil {
-		return constSeries(f, ctx), nil
-	}
-
-	// Arithmetic: a op b
-	if vs, err := evalArithmetic(expr, ctx); err == nil {
-		return vs, nil
-	}
-
-	return nil, fmt.Errorf("unknown expression: %q", expr)
+	return p.timeframe
 }
 
-// constSeries creates a ValueSeries filled with a constant.
-func constSeries(f float64, ctx *evalContext) pine.ValueSeries {
-	vs := pine.NewValueSeries()
-	cur := ctx.series.GoToFirst()
-	for cur != nil {
-		vs.Set(cur.S, f)
-		next, err := ctx.series.Next()
-		if err != nil || next == nil {
+func (p *barProvider) SetSession(session string) error {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return nil
+	}
+	p.session = session
+	return nil
+}
+
+func (p *barProvider) GetSession() string {
+	if p.session == "" {
+		return "regular"
+	}
+	return p.session
+}
+
+func parseSeriesKey(seriesKey string) (string, string, error) {
+	parts := strings.Split(seriesKey, "|")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid series key %q (expected symbol|value_type)", seriesKey)
+	}
+	symbol := strings.TrimSpace(parts[0])
+	valueType := strings.ToLower(strings.TrimSpace(parts[1]))
+	if symbol == "" || valueType == "" {
+		return "", "", fmt.Errorf("invalid series key %q", seriesKey)
+	}
+	return symbol, valueType, nil
+}
+
+func valueFromBar(b Bar, valueType string) (float64, error) {
+	switch strings.ToLower(valueType) {
+	case "open":
+		return b.Open, nil
+	case "high":
+		return b.High, nil
+	case "low":
+		return b.Low, nil
+	case "close":
+		return b.Close, nil
+	case "volume":
+		return b.Volume, nil
+	case "hl2":
+		return (b.High + b.Low) / 2.0, nil
+	case "hlc3":
+		return (b.High + b.Low + b.Close) / 3.0, nil
+	default:
+		return 0, fmt.Errorf("unsupported value_type %q", valueType)
+	}
+}
+
+type plotCollector struct {
+	bars  []Bar
+	plots map[string][]PlotPoint
+	mu    sync.Mutex
+}
+
+func newPlotCollector(bs []Bar) *plotCollector {
+	return &plotCollector{
+		bars:  bs,
+		plots: make(map[string][]PlotPoint),
+	}
+}
+
+func (c *plotCollector) capture(args ...interface{}) (interface{}, error) {
+	if len(args) < 1 {
+		return math.NaN(), errors.New("__plot_capture__ expects at least 1 argument")
+	}
+	v, ok := toFloat64(args[0])
+	if !ok || math.IsNaN(v) || math.IsInf(v, 0) {
+		return args[0], nil
+	}
+
+	name := "plot"
+	if len(args) >= 2 {
+		name = toName(args[1], name)
+	}
+
+	barIdx := len(c.bars) - 1
+	if len(args) >= 3 {
+		if idx, ok := toInt(args[2]); ok {
+			barIdx = idx
+		}
+	}
+
+	if barIdx < 0 || barIdx >= len(c.bars) {
+		return args[0], nil
+	}
+
+	point := PlotPoint{Time: c.bars[barIdx].Time, Value: v}
+
+	c.mu.Lock()
+	c.plots[name] = append(c.plots[name], point)
+	c.mu.Unlock()
+
+	return args[0], nil
+}
+
+func (c *plotCollector) snapshot() map[string][]PlotPoint {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	out := make(map[string][]PlotPoint, len(c.plots))
+	for name, pts := range c.plots {
+		copied := make([]PlotPoint, len(pts))
+		copy(copied, pts)
+		out[name] = copied
+	}
+	return out
+}
+
+func normalizeScript(script string) (string, error) {
+	lines := strings.Split(script, "\n")
+	cleaned := make([]string, 0, len(lines))
+
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "//") {
+			continue
+		}
+
+		if startsWithCall(line, "indicator") {
+			continue
+		}
+
+		if rewritten, ok, err := rewritePlotLine(line); ok {
+			if err != nil {
+				return "", err
+			}
+			cleaned = append(cleaned, rewritten)
+			continue
+		}
+
+		cleaned = append(cleaned, line)
+	}
+
+	if len(cleaned) == 0 {
+		return "", errors.New("script has no executable statements")
+	}
+
+	return strings.Join(cleaned, "\n"), nil
+}
+
+func rewritePlotLine(line string) (string, bool, error) {
+	if !startsWithCall(line, "plot") {
+		return "", false, nil
+	}
+
+	inner, err := extractCallInner(line, "plot")
+	if err != nil {
+		return "", true, err
+	}
+
+	args := splitTopLevel(inner, ',')
+	if len(args) == 0 {
+		return "", true, errors.New("plot() requires at least one argument")
+	}
+
+	expr := strings.TrimSpace(args[0])
+	if expr == "" {
+		return "", true, errors.New("plot() first argument cannot be empty")
+	}
+
+	titleArg := strconv.Quote(expr)
+	for _, rawArg := range args[1:] {
+		arg := strings.TrimSpace(rawArg)
+		if arg == "" {
+			continue
+		}
+		if key, value, ok := splitNamedArg(arg); ok && key == "title" {
+			if strings.TrimSpace(value) != "" {
+				titleArg = strings.TrimSpace(value)
+			}
 			break
 		}
-		cur = next
+		if isQuotedLiteral(arg) {
+			titleArg = arg
+			break
+		}
 	}
-	if cur := ctx.series.Current(); cur != nil {
-		vs.SetCurrent(cur.S)
-	}
-	return vs
+
+	return fmt.Sprintf("__plot_capture__(%s, %s, bar_index)", expr, titleArg), true, nil
 }
 
-// evalArithmetic handles simple binary operations.
-func evalArithmetic(expr string, ctx *evalContext) (pine.ValueSeries, error) {
-	ops := []byte{'+', '-', '*', '/'}
-	for _, op := range ops {
-		depth := 0
-		for i := len(expr) - 1; i > 0; i-- {
-			switch expr[i] {
-			case ')':
-				depth++
-			case '(':
-				depth--
-			}
-			if depth == 0 && expr[i] == op {
-				a, err := evalExpr(expr[:i], ctx)
-				if err != nil {
-					return nil, err
-				}
-				b, err := evalExpr(expr[i+1:], ctx)
-				if err != nil {
-					return nil, err
-				}
-				switch op {
-				case '+':
-					return pine.Add(a, b), nil
-				case '-':
-					return pine.Sub(a, b), nil
-				case '*':
-					return pine.Mul(a, b), nil
-				case '/':
-					return pine.Div(a, b), nil
-				}
-			}
-		}
+func startsWithCall(line, name string) bool {
+	if !strings.HasPrefix(line, name) {
+		return false
 	}
-	return nil, fmt.Errorf("not arithmetic")
+	i := len(name)
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+	return i < len(line) && line[i] == '('
 }
 
-// evalTACall evaluates a ta.xxx(...) function call.
-func evalTACall(expr string, ctx *evalContext) (pine.ValueSeries, error) {
-	parenIdx := strings.Index(expr, "(")
-	if parenIdx < 0 {
-		return nil, fmt.Errorf("missing ( in %q", expr)
+func extractCallInner(line, name string) (string, error) {
+	if !startsWithCall(line, name) {
+		return "", fmt.Errorf("line is not %s(...)", name)
 	}
-	fn := expr[:parenIdx]
-	argsStr := extractBetweenParens(expr[parenIdx:])
-	args := splitTopLevel(argsStr, ',')
 
-	switch fn {
-	case "ta.sma":
-		src, l, err := srcAndLen(args, 0, 1, 14, ctx)
-		if err != nil {
-			return nil, err
+	openIdx := -1
+	for i := len(name); i < len(line); i++ {
+		if line[i] == '(' {
+			openIdx = i
+			break
 		}
-		return pine.SMA(src, int64(l)), nil
-
-	case "ta.ema":
-		src, l, err := srcAndLen(args, 0, 1, 14, ctx)
-		if err != nil {
-			return nil, err
-		}
-		return pine.EMA(src, int64(l)), nil
-
-	case "ta.rma":
-		src, l, err := srcAndLen(args, 0, 1, 14, ctx)
-		if err != nil {
-			return nil, err
-		}
-		return pine.RMA(src, int64(l)), nil
-
-	case "ta.rsi":
-		src, l, err := srcAndLen(args, 0, 1, 14, ctx)
-		if err != nil {
-			return nil, err
-		}
-		return pine.RSI(src, int64(l)), nil
-
-	case "ta.atr":
-		l := intArg(args, 0, 14)
-		tr := pine.OHLCVAttr(ctx.series, pine.OHLCPropTR)
-		return pine.ATR(tr, int64(l)), nil
-
-	case "ta.cci":
-		l := intArg(args, 0, 20)
-		tp := pine.OHLCVAttr(ctx.series, pine.OHLCPropHLC3)
-		return pine.CCI(tp, int64(l)), nil
-
-	case "ta.mfi":
-		l := intArg(args, 0, 14)
-		return pine.MFI(ctx.series, int64(l)), nil
-
-	case "ta.stdev":
-		src, l, err := srcAndLen(args, 0, 1, 14, ctx)
-		if err != nil {
-			return nil, err
-		}
-		return pine.Stdev(src, int64(l)), nil
-
-	case "ta.variance":
-		src, l, err := srcAndLen(args, 0, 1, 14, ctx)
-		if err != nil {
-			return nil, err
-		}
-		return pine.Variance(src, int64(l)), nil
-
-	case "ta.roc":
-		src, l, err := srcAndLen(args, 0, 1, 14, ctx)
-		if err != nil {
-			return nil, err
-		}
-		return pine.ROC(src, l), nil
-
-	case "ta.change":
-		src, l, err := srcAndLen(args, 0, 1, 1, ctx)
-		if err != nil {
-			return nil, err
-		}
-		return pine.Change(src, l), nil
-
-	// Multi-return functions — return first value when used as single expr.
-	case "ta.macd":
-		results, err := evalMultiExpr(expr, ctx)
-		if err != nil {
-			return nil, err
-		}
-		if len(results) > 0 {
-			return results[0], nil
-		}
-
-	case "ta.bb", "ta.bbands":
-		results, err := evalMultiExpr(expr, ctx)
-		if err != nil {
-			return nil, err
-		}
-		if len(results) > 0 {
-			return results[0], nil
-		}
-
-	case "ta.dmi":
-		results, err := evalMultiExpr(expr, ctx)
-		if err != nil {
-			return nil, err
-		}
-		if len(results) > 0 {
-			return results[0], nil
-		}
-
-	case "ta.kc":
-		results, err := evalMultiExpr(expr, ctx)
-		if err != nil {
-			return nil, err
-		}
-		if len(results) > 0 {
-			return results[0], nil
-		}
-
-	default:
-		return nil, fmt.Errorf("unsupported function: %s", fn)
 	}
-	return nil, fmt.Errorf("function %s returned no results", fn)
-}
-
-// evalMultiExpr evaluates functions that return multiple ValueSeries.
-func evalMultiExpr(expr string, ctx *evalContext) ([]pine.ValueSeries, error) {
-	expr = strings.TrimSpace(expr)
-	parenIdx := strings.Index(expr, "(")
-	if parenIdx < 0 {
-		return nil, fmt.Errorf("missing ( in %q", expr)
+	if openIdx < 0 {
+		return "", fmt.Errorf("invalid %s(...) call", name)
 	}
-	fn := expr[:parenIdx]
-	argsStr := extractBetweenParens(expr[parenIdx:])
-	args := splitTopLevel(argsStr, ',')
 
-	switch fn {
-	case "ta.macd":
-		// ta.macd(source, fast, slow, signal)
-		src, err := resolveSource(args, 0, ctx)
-		if err != nil {
-			return nil, err
-		}
-		fast := int64(intArg(args, 1, 12))
-		slow := int64(intArg(args, 2, 26))
-		sig := int64(intArg(args, 3, 9))
-		macdLine, sigLine, histLine := pine.MACD(src, fast, slow, sig)
-		return []pine.ValueSeries{macdLine, sigLine, histLine}, nil
-
-	case "ta.bb", "ta.bbands":
-		// ta.bb(source, length, mult)
-		src, err := resolveSource(args, 0, ctx)
-		if err != nil {
-			return nil, err
-		}
-		l := int64(intArg(args, 1, 20))
-		mult := floatArg(args, 2, 2.0)
-		mid := pine.SMA(src, l)
-		stdev := pine.Stdev(src, l)
-		upper := pine.Add(mid, pine.MulConst(stdev, mult))
-		lower := pine.Sub(mid, pine.MulConst(stdev, mult))
-		return []pine.ValueSeries{mid, upper, lower}, nil
-
-	case "ta.dmi":
-		// ta.dmi(length, smooth)
-		l := intArg(args, 0, 14)
-		smooth := intArg(args, 1, 14)
-		adx, plus, minus := pine.DMI(ctx.series, l, smooth)
-		return []pine.ValueSeries{adx, plus, minus}, nil
-
-	case "ta.kc":
-		// ta.kc(source, length, mult)
-		src, err := resolveSource(args, 0, ctx)
-		if err != nil {
-			return nil, err
-		}
-		l := int64(intArg(args, 1, 20))
-		mult := floatArg(args, 2, 1.5)
-		mid, upper, lower := pine.KC(src, ctx.series, l, mult, true)
-		return []pine.ValueSeries{mid, upper, lower}, nil
-	}
-	return nil, fmt.Errorf("unknown multi-return function: %s", fn)
-}
-
-// ─── argument helpers ─────────────────────────────────────────────────────────
-
-func srcAndLen(args []string, srcIdx, lenIdx, defLen int, ctx *evalContext) (pine.ValueSeries, int, error) {
-	src, err := resolveSource(args, srcIdx, ctx)
+	closeIdx, err := findMatchingParen(line, openIdx)
 	if err != nil {
-		return nil, 0, err
+		return "", err
 	}
-	return src, intArg(args, lenIdx, defLen), nil
+
+	return line[openIdx+1 : closeIdx], nil
 }
 
-func resolveSource(args []string, idx int, ctx *evalContext) (pine.ValueSeries, error) {
-	if idx >= len(args) {
-		return pine.OHLCVAttr(ctx.series, pine.OHLCPropClose), nil
+func findMatchingParen(s string, openIdx int) (int, error) {
+	if openIdx < 0 || openIdx >= len(s) || s[openIdx] != '(' {
+		return -1, errors.New("invalid opening parenthesis")
 	}
-	return evalExpr(strings.TrimSpace(args[idx]), ctx)
-}
 
-func intArg(args []string, idx, def int) int {
-	if idx >= len(args) {
-		return def
-	}
-	if n, err := strconv.Atoi(strings.TrimSpace(args[idx])); err == nil {
-		return n
-	}
-	return def
-}
-
-func floatArg(args []string, idx int, def float64) float64 {
-	if idx >= len(args) {
-		return def
-	}
-	if f, err := strconv.ParseFloat(strings.TrimSpace(args[idx]), 64); err == nil {
-		return f
-	}
-	return def
-}
-
-// ─── string helpers ───────────────────────────────────────────────────────────
-
-// extractBetweenParens returns the content inside the outermost () pair.
-func extractBetweenParens(s string) string {
-	start := strings.Index(s, "(")
-	if start < 0 {
-		return s
-	}
 	depth := 0
-	for i := start; i < len(s); i++ {
-		switch s[i] {
+	var quote byte
+	escaped := false
+
+	for i := openIdx; i < len(s); i++ {
+		ch := s[i]
+
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+
+		if ch == '\'' || ch == '"' {
+			quote = ch
+			continue
+		}
+
+		switch ch {
 		case '(':
 			depth++
 		case ')':
 			depth--
 			if depth == 0 {
-				return s[start+1 : i]
+				return i, nil
 			}
 		}
 	}
-	return s[start+1:]
+
+	return -1, errors.New("unmatched parentheses")
 }
 
-// splitTopLevel splits s by sep, ignoring separators inside brackets/parens.
-func splitTopLevel(s string, sep rune) []string {
-	var parts []string
-	depth := 0
+func splitTopLevel(s string, sep byte) []string {
+	parts := make([]string, 0, 4)
 	start := 0
-	for i, ch := range s {
+	parenDepth := 0
+	bracketDepth := 0
+	braceDepth := 0
+	var quote byte
+	escaped := false
+
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+
+		if ch == '\'' || ch == '"' {
+			quote = ch
+			continue
+		}
+
 		switch ch {
-		case '(', '[':
-			depth++
-		case ')', ']':
-			depth--
-		default:
-			if ch == sep && depth == 0 {
-				parts = append(parts, s[start:i])
+		case '(':
+			parenDepth++
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		case '[':
+			bracketDepth++
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case '{':
+			braceDepth++
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		case sep:
+			if parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 {
+				parts = append(parts, strings.TrimSpace(s[start:i]))
 				start = i + 1
 			}
 		}
 	}
-	return append(parts, s[start:])
+
+	parts = append(parts, strings.TrimSpace(s[start:]))
+	return parts
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Indicator evaluation helpers
-// ─────────────────────────────────────────────────────────────────────────────
+func splitNamedArg(arg string) (string, string, bool) {
+	idx := indexTopLevelByte(arg, '=')
+	if idx <= 0 {
+		return "", "", false
+	}
+	key := strings.TrimSpace(arg[:idx])
+	value := strings.TrimSpace(arg[idx+1:])
+	if key == "" || value == "" {
+		return "", "", false
+	}
+	return key, value, true
+}
+
+func indexTopLevelByte(s string, target byte) int {
+	parenDepth := 0
+	bracketDepth := 0
+	braceDepth := 0
+	var quote byte
+	escaped := false
+
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+
+		if ch == '\'' || ch == '"' {
+			quote = ch
+			continue
+		}
+
+		switch ch {
+		case '(':
+			parenDepth++
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		case '[':
+			bracketDepth++
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case '{':
+			braceDepth++
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		case target:
+			if parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 {
+				return i
+			}
+		}
+	}
+
+	return -1
+}
+
+func isQuotedLiteral(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 2 {
+		return false
+	}
+	return (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')
+}
+
+func toName(v interface{}, fallback string) string {
+	if v == nil {
+		return fallback
+	}
+	if s, ok := v.(string); ok {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return fallback
+		}
+		return s
+	}
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
+func toFloat64(v interface{}) (float64, bool) {
+	switch x := v.(type) {
+	case float64:
+		return x, true
+	case float32:
+		return float64(x), true
+	case int:
+		return float64(x), true
+	case int8:
+		return float64(x), true
+	case int16:
+		return float64(x), true
+	case int32:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	case uint:
+		return float64(x), true
+	case uint8:
+		return float64(x), true
+	case uint16:
+		return float64(x), true
+	case uint32:
+		return float64(x), true
+	case uint64:
+		return float64(x), true
+	case bool:
+		if x {
+			return 1, true
+		}
+		return 0, true
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	case json.Number:
+		f, err := x.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return f, true
+	default:
+		return 0, false
+	}
+}
+
+func toInt(v interface{}) (int, bool) {
+	switch x := v.(type) {
+	case int:
+		return x, true
+	case int8:
+		return int(x), true
+	case int16:
+		return int(x), true
+	case int32:
+		return int(x), true
+	case int64:
+		return int(x), true
+	case uint:
+		return int(x), true
+	case uint8:
+		return int(x), true
+	case uint16:
+		return int(x), true
+	case uint32:
+		return int(x), true
+	case uint64:
+		return int(x), true
+	case float64:
+		return int(x), true
+	case float32:
+		return int(x), true
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(x))
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	default:
+		return 0, false
+	}
+}
+
+func evalScript(script string, bs []Bar) (map[string][]PlotPoint, error) {
+	normalized, err := normalizeScript(script)
+	if err != nil {
+		return nil, err
+	}
+
+	provider := newBarProvider("DEMO", bs)
+	collector := newPlotCollector(bs)
+
+	engine := pine.NewEngine()
+	engine.RegisterMarketDataProvider(provider)
+	engine.SetDefaultSymbol(provider.symbol)
+	engine.SetDefaultValueType("close")
+	engine.SetTimeframe(provider.GetTimeframe())
+	engine.SetSession(provider.GetSession())
+	if len(bs) > 0 {
+		engine.SetStartTime(time.Unix(bs[0].Time, 0).UTC())
+		engine.SetCurrentTime(time.Unix(bs[len(bs)-1].Time, 0).UTC())
+	}
+
+	engine.RegisterFunction("__plot_capture__", collector.capture)
+
+	bytecode, err := engine.Compile(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("compile failed: %w", err)
+	}
+
+	v, err := engine.Execute(bytecode)
+	if err != nil {
+		return nil, fmt.Errorf("execute failed: %w", err)
+	}
+
+	plots := collector.snapshot()
+	if len(plots) == 0 && len(bs) > 0 {
+		if fv, ok := toFloat64(v); ok && !math.IsNaN(fv) && !math.IsInf(fv, 0) {
+			plots["result"] = []PlotPoint{{Time: bs[len(bs)-1].Time, Value: fv}}
+		}
+	}
+
+	return plots, nil
+}
 
 func evalIndicatorOutput(ind *IndicatorScript, bs []Bar) (*IndicatorOutput, error) {
 	plots, err := evalScript(ind.Script, bs)
 	if err != nil {
 		return nil, err
 	}
-	return &IndicatorOutput{IndicatorID: ind.ID, Name: ind.Name, Plots: plots}, nil
+	return &IndicatorOutput{
+		IndicatorID: ind.ID,
+		Name:        ind.Name,
+		Plots:       plots,
+	}, nil
+}
+
+func barsSnapshot() []Bar {
+	barsMu.RLock()
+	defer barsMu.RUnlock()
+	out := make([]Bar, len(bars))
+	copy(out, bars)
+	return out
+}
+
+func indicatorsSnapshot() []*IndicatorScript {
+	indMu.RLock()
+	defer indMu.RUnlock()
+
+	out := make([]*IndicatorScript, 0, len(indicators))
+	for _, ind := range indicators {
+		if ind == nil {
+			continue
+		}
+		cp := *ind
+		out = append(out, &cp)
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 func latestIndicatorValues(bs []Bar) []IndicatorUpdate {
-	indMu.RLock()
-	defs := make([]*IndicatorScript, 0, len(indicators))
-	for _, d := range indicators {
-		defs = append(defs, d)
-	}
-	indMu.RUnlock()
-	sort.Slice(defs, func(i, j int) bool { return defs[i].ID < defs[j].ID })
+	inds := indicatorsSnapshot()
+	updates := make([]IndicatorUpdate, 0, len(inds))
 
-	var updates []IndicatorUpdate
-	for _, def := range defs {
-		ohlcvs := barsToOHLCV(bs)
-		series, err := pine.NewOHLCVSeries(ohlcvs)
+	for _, ind := range inds {
+		plots, err := evalScript(ind.Script, bs)
 		if err != nil {
+			log.Printf("eval error %s: %v", ind.ID, err)
 			continue
 		}
-		for {
-			v, err := series.Next()
-			if err != nil || v == nil {
-				break
+
+		vals := make(map[string]float64)
+		for name, pts := range plots {
+			if len(pts) == 0 {
+				continue
 			}
+			vals[name] = pts[len(pts)-1].Value
 		}
-		namedSeries, err := parsePinePlots(def.Script, series)
-		if err != nil {
-			log.Printf("eval error %s: %v", def.ID, err)
+		if len(vals) == 0 {
 			continue
 		}
-		values := make(map[string]float64)
-		for name, vs := range namedSeries {
-			if val, ok := latestVal(vs, bs); ok {
-				values[name] = val
-			}
-		}
+
 		updates = append(updates, IndicatorUpdate{
-			IndicatorID: def.ID,
-			Name:        def.Name,
-			Values:      values,
+			IndicatorID: ind.ID,
+			Name:        ind.Name,
+			Values:      vals,
 		})
 	}
+
+	sort.Slice(updates, func(i, j int) bool {
+		return updates[i].IndicatorID < updates[j].IndicatorID
+	})
+
 	return updates
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// WebSocket
-// ─────────────────────────────────────────────────────────────────────────────
-
 func broadcast(env WSEnvelope) {
-	data, _ := json.Marshal(env)
+	b, _ := json.Marshal(env)
+
 	clientsMu.RLock()
-	defer clientsMu.RUnlock()
-	for conn := range clients {
-		_ = conn.WriteMessage(websocket.TextMessage, data)
+	conns := make([]*websocket.Conn, 0, len(clients))
+	for c := range clients {
+		conns = append(conns, c)
+	}
+	clientsMu.RUnlock()
+
+	for _, c := range conns {
+		if err := c.WriteMessage(websocket.TextMessage, b); err != nil {
+			clientsMu.Lock()
+			delete(clients, c)
+			clientsMu.Unlock()
+			_ = c.Close()
+		}
 	}
 }
 
-func writeError(conn *websocket.Conn, msg string) {
-	_ = conn.WriteJSON(WSEnvelope{Type: "error", Error: msg})
+func writeError(c *websocket.Conn, msg string) {
+	_ = c.WriteJSON(WSEnvelope{Type: "error", Error: msg})
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("ws upgrade:", err)
+		log.Println("upgrade:", err)
 		return
 	}
 	defer conn.Close()
@@ -845,91 +863,93 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	clientsMu.Lock()
 	clients[conn] = true
 	clientsMu.Unlock()
-	defer func() {
-		clientsMu.Lock()
-		delete(clients, conn)
-		clientsMu.Unlock()
-	}()
 
-	// Send history on connect.
-	barsMu.RLock()
-	histCopy := make([]Bar, len(bars))
-	copy(histCopy, bars)
-	barsMu.RUnlock()
-	if err := conn.WriteJSON(WSEnvelope{Type: "history", Bars: histCopy}); err != nil {
-		return
-	}
+	_ = conn.WriteJSON(WSEnvelope{Type: "history", Bars: barsSnapshot()})
 
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
-			break
+			clientsMu.Lock()
+			delete(clients, conn)
+			clientsMu.Unlock()
+			return
 		}
-		var msg map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &msg); err != nil {
-			continue
-		}
-		var msgType string
-		if err := json.Unmarshal(msg["type"], &msgType); err != nil {
+
+		var req WSEnvelope
+		if err := json.Unmarshal(raw, &req); err != nil {
+			writeError(conn, "bad request JSON")
 			continue
 		}
 
-		switch msgType {
+		switch req.Type {
 		case "add_indicator":
-			var ind IndicatorScript
-			if err := json.Unmarshal(msg["indicator"], &ind); err != nil {
-				writeError(conn, "invalid indicator payload")
+			if req.Indicator == nil {
+				writeError(conn, "missing indicator payload")
 				continue
 			}
-			if ind.ID == "" || ind.Script == "" {
-				writeError(conn, "id and script are required")
+
+			ind := &IndicatorScript{
+				ID:     strings.TrimSpace(req.Indicator.ID),
+				Name:   strings.TrimSpace(req.Indicator.Name),
+				Script: req.Indicator.Script,
+			}
+			if ind.ID == "" {
+				writeError(conn, "indicator.id is required")
+				continue
+			}
+			if strings.TrimSpace(ind.Script) == "" {
+				writeError(conn, "indicator.script is required")
 				continue
 			}
 			if ind.Name == "" {
 				ind.Name = ind.ID
 			}
+
 			indMu.Lock()
-			indicators[ind.ID] = &ind
+			indicators[ind.ID] = ind
 			indMu.Unlock()
 
-			barsMu.RLock()
-			bsCopy := make([]Bar, len(bars))
-			copy(bsCopy, bars)
-			barsMu.RUnlock()
-
-			out, err := evalIndicatorOutput(&ind, bsCopy)
+			output, err := evalIndicatorOutput(ind, barsSnapshot())
 			if err != nil {
+				indMu.Lock()
+				delete(indicators, ind.ID)
+				indMu.Unlock()
 				writeError(conn, fmt.Sprintf("eval error: %v", err))
 				continue
 			}
-			_ = conn.WriteJSON(WSEnvelope{Type: "indicator_loaded", IndicatorOutput: out})
+
+			_ = conn.WriteJSON(WSEnvelope{Type: "indicator_loaded", IndicatorOutput: output})
 
 		case "remove_indicator":
-			var id string
-			if err := json.Unmarshal(msg["id"], &id); err != nil {
+			id := strings.TrimSpace(req.ID)
+			if id == "" {
+				writeError(conn, "id is required")
 				continue
 			}
+
 			indMu.Lock()
 			delete(indicators, id)
 			indMu.Unlock()
+
 			_ = conn.WriteJSON(WSEnvelope{Type: "indicator_removed", IndicatorID: id})
+
+		default:
+			writeError(conn, "unknown type: "+req.Type)
 		}
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Tick loop
-// ─────────────────────────────────────────────────────────────────────────────
-
 func tickLoop() {
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+
 	for range ticker.C {
 		barsMu.Lock()
-		prev := bars[len(bars)-1]
-		nb := nextBar(prev, rng)
-		bars = append(bars, nb)
+		if len(bars) == 0 {
+			bars = seedHistory(300)
+		}
+		next := nextBar(bars[len(bars)-1])
+		bars = append(bars, next)
 		if len(bars) > 500 {
 			bars = bars[len(bars)-500:]
 		}
@@ -938,30 +958,33 @@ func tickLoop() {
 		barsMu.Unlock()
 
 		updates := latestIndicatorValues(bsCopy)
-		broadcast(WSEnvelope{Type: "tick", Bar: &nb, IndicatorUpdates: updates})
+
+		broadcast(WSEnvelope{
+			Type:             "tick",
+			Bar:              &next,
+			IndicatorUpdates: updates,
+		})
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// main
-// ─────────────────────────────────────────────────────────────────────────────
-
 func main() {
+	rand.Seed(time.Now().UnixNano())
+
 	barsMu.Lock()
 	bars = seedHistory(300)
 	barsMu.Unlock()
 
 	go tickLoop()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", wsHandler)
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/ws", wsHandler)
+	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	log.Println("pinescription-demo backend listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	addr := ":8080"
+	log.Printf("backend listening on %s", addr)
+	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatal(err)
 	}
 }
