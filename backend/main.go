@@ -318,7 +318,7 @@ func parsePlotLine(line string, ctx *evalContext) (string, pine.ValueSeries, err
 	if len(args) == 0 {
 		return "", nil, fmt.Errorf("empty plot()")
 	}
-	expr := strings.TrimSpace(args[0])
+	expr := namedArgValue(args[0])
 	name := expr
 	for _, arg := range args[1:] {
 		arg = strings.TrimSpace(arg)
@@ -696,14 +696,26 @@ func resolveSource(args []string, idx int, ctx *evalContext) (pine.ValueSeries, 
 	if idx >= len(args) {
 		return pine.OHLCVAttr(ctx.series, pine.OHLCPropClose), nil
 	}
-	return evalExpr(strings.TrimSpace(args[idx]), ctx)
+	return evalExpr(namedArgValue(args[idx]), ctx)
+}
+
+// namedArgValue strips an optional "name=" prefix from a raw argument string,
+// returning just the value portion. This allows callers like intArg, floatArg,
+// and resolveSource to handle both positional ("20") and named ("length=20")
+// argument styles transparently.
+func namedArgValue(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if eq := strings.IndexByte(raw, '='); eq >= 0 {
+		return strings.TrimSpace(raw[eq+1:])
+	}
+	return raw
 }
 
 func intArg(args []string, idx, def int) int {
 	if idx >= len(args) {
 		return def
 	}
-	if n, err := strconv.Atoi(strings.TrimSpace(args[idx])); err == nil {
+	if n, err := strconv.Atoi(namedArgValue(args[idx])); err == nil {
 		return n
 	}
 	return def
@@ -713,7 +725,7 @@ func floatArg(args []string, idx int, def float64) float64 {
 	if idx >= len(args) {
 		return def
 	}
-	if f, err := strconv.ParseFloat(strings.TrimSpace(args[idx]), 64); err == nil {
+	if f, err := strconv.ParseFloat(namedArgValue(args[idx]), 64); err == nil {
 		return f
 	}
 	return def
