@@ -268,7 +268,7 @@ func newPlotCollector(bs []Bar) *plotCollector {
 
 func (c *plotCollector) capture(args ...interface{}) (interface{}, error) {
 	if len(args) < 1 {
-		return math.NaN(), errors.New("__plot_capture__ expects at least 1 argument")
+		return math.NaN(), errors.New("plot expects at least 1 argument")
 	}
 	v, ok := toFloat64(args[0])
 	if !ok || math.IsNaN(v) || math.IsInf(v, 0) {
@@ -383,11 +383,12 @@ func stripLeadingCall(line, name string) (string, bool, error) {
 }
 
 func rewritePlotCalls(line string) (string, bool, error) {
-	rewritten := line
+	var rewritten strings.Builder
+	pos := 0
 	changed := false
 
-	for {
-		startIdx, openIdx, closeIdx, err := findTopLevelCall(rewritten, "plot")
+	for pos < len(line) {
+		startIdx, openIdx, closeIdx, err := findTopLevelCall(line[pos:], "plot")
 		if err != nil {
 			return "", changed, err
 		}
@@ -395,16 +396,27 @@ func rewritePlotCalls(line string) (string, bool, error) {
 			break
 		}
 
-		replacement, err := rewritePlotInner(rewritten[openIdx+1 : closeIdx])
+		startIdx += pos
+		openIdx += pos
+		closeIdx += pos
+
+		rewritten.WriteString(line[pos:startIdx])
+
+		replacement, err := rewritePlotInner(line[openIdx+1 : closeIdx])
 		if err != nil {
 			return "", true, err
 		}
 
-		rewritten = rewritten[:startIdx] + replacement + rewritten[closeIdx+1:]
+		rewritten.WriteString(replacement)
+		pos = closeIdx + 1
 		changed = true
 	}
 
-	return rewritten, changed, nil
+	if !changed {
+		return line, false, nil
+	}
+	rewritten.WriteString(line[pos:])
+	return rewritten.String(), true, nil
 }
 
 func findTopLevelCall(s, name string) (startIdx, openIdx, closeIdx int, err error) {
@@ -489,26 +501,7 @@ func isIdentifierByte(ch byte) bool {
 		ch == '_'
 }
 
-func rewritePlotLine(line string) (string, bool, error) {
-	if !startsWithCall(line, "plot") {
-		return "", false, nil
-	}
-
-	inner, err := extractCallInner(line, "plot")
-	if err != nil {
-		return "", true, err
-	}
-
-	rewritten, err := rewritePlotInner(inner)
-	if err != nil {
-		return "", true, err
-	}
-
-	return rewritten, true, nil
-}
-
 func rewritePlotInner(inner string) (string, error) {
-
 	args := splitTopLevel(inner, ',')
 	if len(args) == 0 {
 		return "", errors.New("plot() requires at least one argument")
@@ -537,7 +530,7 @@ func rewritePlotInner(inner string) (string, error) {
 		}
 	}
 
-	return fmt.Sprintf("__plot_capture__(%s, %s, bar_index)", expr, titleArg), nil
+	return fmt.Sprintf("plot(%s, %s, bar_index)", expr, titleArg), nil
 }
 
 func startsWithCall(line, name string) bool {
@@ -549,30 +542,6 @@ func startsWithCall(line, name string) bool {
 		i++
 	}
 	return i < len(line) && line[i] == '('
-}
-
-func extractCallInner(line, name string) (string, error) {
-	if !startsWithCall(line, name) {
-		return "", fmt.Errorf("line is not %s(...)", name)
-	}
-
-	openIdx := -1
-	for i := len(name); i < len(line); i++ {
-		if line[i] == '(' {
-			openIdx = i
-			break
-		}
-	}
-	if openIdx < 0 {
-		return "", fmt.Errorf("invalid %s(...) call", name)
-	}
-
-	closeIdx, err := findMatchingParen(line, openIdx)
-	if err != nil {
-		return "", err
-	}
-
-	return line[openIdx+1 : closeIdx], nil
 }
 
 func findMatchingParen(s string, openIdx int) (int, error) {
@@ -916,7 +885,7 @@ func evalScript(script string, bs []Bar) (map[string][]PlotPoint, error) {
 		engine.SetCurrentTime(time.Unix(bs[len(bs)-1].Time, 0).UTC())
 	}
 
-	engine.RegisterFunction("__plot_capture__", collector.capture)
+	engine.RegisterFunction("plot", collector.capture)
 
 	bytecode, err := engine.Compile(normalized)
 	if err != nil {
