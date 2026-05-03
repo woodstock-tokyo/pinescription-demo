@@ -78,6 +78,23 @@ var (
 		WriteBufferSize: 1024,
 		CheckOrigin:     func(_ *http.Request) bool { return true },
 	}
+
+	plotParamNames = []string{
+		"series",
+		"title",
+		"color",
+		"linewidth",
+		"style",
+		"transp",
+		"trackprice",
+		"histbase",
+		"offset",
+		"join",
+		"editable",
+		"show_last",
+		"display",
+		"scale",
+	}
 )
 
 func seedHistory(n int) []Bar {
@@ -280,22 +297,16 @@ func (c *plotCollector) capture(args ...interface{}) (interface{}, error) {
 		name = toName(args[1], name)
 	}
 
-	barIdx := len(c.bars) - 1
-	if len(args) >= 3 {
-		if idx, ok := toInt(args[2]); ok {
-			barIdx = idx
-		}
-	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	barIdx := len(c.plots[name])
 	if barIdx < 0 || barIdx >= len(c.bars) {
 		return args[0], nil
 	}
 
 	point := PlotPoint{Time: c.bars[barIdx].Time, Value: v}
-
-	c.mu.Lock()
 	c.plots[name] = append(c.plots[name], point)
-	c.mu.Unlock()
 
 	return args[0], nil
 }
@@ -331,15 +342,6 @@ func normalizeScript(script string) (string, error) {
 			line = stripped
 		}
 		if line == "" || strings.HasPrefix(line, "//") {
-			continue
-		}
-
-		rewritten, changed, err := rewritePlotCalls(line)
-		if err != nil {
-			return "", err
-		}
-		if changed {
-			cleaned = append(cleaned, rewritten)
 			continue
 		}
 
@@ -380,157 +382,6 @@ func stripLeadingCall(line, name string) (string, bool, error) {
 	}
 
 	return remainder, true, nil
-}
-
-func rewritePlotCalls(line string) (string, bool, error) {
-	var rewritten strings.Builder
-	pos := 0
-	changed := false
-
-	for pos < len(line) {
-		startIdx, openIdx, closeIdx, err := findTopLevelCall(line[pos:], "plot")
-		if err != nil {
-			return "", changed, err
-		}
-		if startIdx < 0 {
-			break
-		}
-
-		startIdx += pos
-		openIdx += pos
-		closeIdx += pos
-
-		rewritten.WriteString(line[pos:startIdx])
-
-		replacement, err := rewritePlotInner(line[openIdx+1 : closeIdx])
-		if err != nil {
-			return "", true, err
-		}
-
-		rewritten.WriteString(replacement)
-		pos = closeIdx + 1
-		changed = true
-	}
-
-	if !changed {
-		return line, false, nil
-	}
-	rewritten.WriteString(line[pos:])
-	return rewritten.String(), true, nil
-}
-
-func findTopLevelCall(s, name string) (startIdx, openIdx, closeIdx int, err error) {
-	parenDepth := 0
-	bracketDepth := 0
-	braceDepth := 0
-	var quote byte
-	escaped := false
-
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-
-		if quote != 0 {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if ch == '\\' {
-				escaped = true
-				continue
-			}
-			if ch == quote {
-				quote = 0
-			}
-			continue
-		}
-
-		if ch == '\'' || ch == '"' {
-			quote = ch
-			continue
-		}
-
-		if parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 && strings.HasPrefix(s[i:], name) {
-			beforeOK := i == 0 || (!isIdentifierByte(s[i-1]) && s[i-1] != '.')
-			afterName := i + len(name)
-			afterOK := afterName >= len(s) || !isIdentifierByte(s[afterName])
-
-			if beforeOK && afterOK {
-				j := afterName
-				for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
-					j++
-				}
-				if j < len(s) && s[j] == '(' {
-					matchedClose, matchErr := findMatchingParen(s, j)
-					if matchErr != nil {
-						return -1, -1, -1, matchErr
-					}
-					return i, j, matchedClose, nil
-				}
-			}
-		}
-
-		switch ch {
-		case '(':
-			parenDepth++
-		case ')':
-			if parenDepth > 0 {
-				parenDepth--
-			}
-		case '[':
-			bracketDepth++
-		case ']':
-			if bracketDepth > 0 {
-				bracketDepth--
-			}
-		case '{':
-			braceDepth++
-		case '}':
-			if braceDepth > 0 {
-				braceDepth--
-			}
-		}
-	}
-
-	return -1, -1, -1, nil
-}
-
-func isIdentifierByte(ch byte) bool {
-	return (ch >= 'a' && ch <= 'z') ||
-		(ch >= 'A' && ch <= 'Z') ||
-		(ch >= '0' && ch <= '9') ||
-		ch == '_'
-}
-
-func rewritePlotInner(inner string) (string, error) {
-	args := splitTopLevel(inner, ',')
-	if len(args) == 0 {
-		return "", errors.New("plot() requires at least one argument")
-	}
-
-	expr := strings.TrimSpace(args[0])
-	if expr == "" {
-		return "", errors.New("plot() first argument cannot be empty")
-	}
-
-	titleArg := strconv.Quote(expr)
-	for _, rawArg := range args[1:] {
-		arg := strings.TrimSpace(rawArg)
-		if arg == "" {
-			continue
-		}
-		if key, value, ok := splitNamedArg(arg); ok && key == "title" {
-			if strings.TrimSpace(value) != "" {
-				titleArg = strings.TrimSpace(value)
-			}
-			break
-		}
-		if isQuotedLiteral(arg) {
-			titleArg = arg
-			break
-		}
-	}
-
-	return fmt.Sprintf("plot(%s, %s, bar_index)", expr, titleArg), nil
 }
 
 func startsWithCall(line, name string) bool {
@@ -588,149 +439,6 @@ func findMatchingParen(s string, openIdx int) (int, error) {
 	}
 
 	return -1, errors.New("unmatched parentheses")
-}
-
-func splitTopLevel(s string, sep byte) []string {
-	parts := make([]string, 0, 4)
-	start := 0
-	parenDepth := 0
-	bracketDepth := 0
-	braceDepth := 0
-	var quote byte
-	escaped := false
-
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-
-		if quote != 0 {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if ch == '\\' {
-				escaped = true
-				continue
-			}
-			if ch == quote {
-				quote = 0
-			}
-			continue
-		}
-
-		if ch == '\'' || ch == '"' {
-			quote = ch
-			continue
-		}
-
-		switch ch {
-		case '(':
-			parenDepth++
-		case ')':
-			if parenDepth > 0 {
-				parenDepth--
-			}
-		case '[':
-			bracketDepth++
-		case ']':
-			if bracketDepth > 0 {
-				bracketDepth--
-			}
-		case '{':
-			braceDepth++
-		case '}':
-			if braceDepth > 0 {
-				braceDepth--
-			}
-		case sep:
-			if parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 {
-				parts = append(parts, strings.TrimSpace(s[start:i]))
-				start = i + 1
-			}
-		}
-	}
-
-	parts = append(parts, strings.TrimSpace(s[start:]))
-	return parts
-}
-
-func splitNamedArg(arg string) (string, string, bool) {
-	idx := indexTopLevelByte(arg, '=')
-	if idx <= 0 {
-		return "", "", false
-	}
-	key := strings.TrimSpace(arg[:idx])
-	value := strings.TrimSpace(arg[idx+1:])
-	if key == "" || value == "" {
-		return "", "", false
-	}
-	return key, value, true
-}
-
-func indexTopLevelByte(s string, target byte) int {
-	parenDepth := 0
-	bracketDepth := 0
-	braceDepth := 0
-	var quote byte
-	escaped := false
-
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-
-		if quote != 0 {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if ch == '\\' {
-				escaped = true
-				continue
-			}
-			if ch == quote {
-				quote = 0
-			}
-			continue
-		}
-
-		if ch == '\'' || ch == '"' {
-			quote = ch
-			continue
-		}
-
-		switch ch {
-		case '(':
-			parenDepth++
-		case ')':
-			if parenDepth > 0 {
-				parenDepth--
-			}
-		case '[':
-			bracketDepth++
-		case ']':
-			if bracketDepth > 0 {
-				bracketDepth--
-			}
-		case '{':
-			braceDepth++
-		case '}':
-			if braceDepth > 0 {
-				braceDepth--
-			}
-		case target:
-			if parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 {
-				return i
-			}
-		}
-	}
-
-	return -1
-}
-
-func isQuotedLiteral(s string) bool {
-	s = strings.TrimSpace(s)
-	if len(s) < 2 {
-		return false
-	}
-	return (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')
 }
 
 func toName(v interface{}, fallback string) string {
@@ -885,7 +593,9 @@ func evalScript(script string, bs []Bar) (map[string][]PlotPoint, error) {
 		engine.SetCurrentTime(time.Unix(bs[len(bs)-1].Time, 0).UTC())
 	}
 
-	engine.RegisterFunction("plot", collector.capture)
+	if err := engine.RegisterFunctionWithParamNames("plot", plotParamNames, collector.capture); err != nil {
+		return nil, fmt.Errorf("register plot function: %w", err)
+	}
 
 	bytecode, err := engine.Compile(normalized)
 	if err != nil {
