@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { WSClient } from './ws'
-import { Bar, IndicatorScript } from './types'
+import type { Bar, IndicatorPane, IndicatorScript } from './types'
 import { PRESETS } from './presets'
 import { useChart, getColourMap } from './useChart'
 
@@ -21,6 +21,7 @@ export default function App() {
   const containerRef = useRef<HTMLDivElement>(null)
   const chart = useChart(containerRef)
   const wsRef = useRef<WSClient | null>(null)
+  const indicatorPaneRef = useRef<Record<string, IndicatorPane>>({})
 
   const [connected,   setConnected]   = useState(false)
   const [activeTab,   setActiveTab]   = useState<'active' | 'add'>('add')
@@ -31,6 +32,7 @@ export default function App() {
   const [formName,    setFormName]    = useState('')
   const [formScript,  setFormScript]  = useState(PRESETS[0].script)
   const [formError,   setFormError]   = useState('')
+  const [hiddenInds,  setHiddenInds]  = useState<Record<string, boolean>>({})
   const [, forceRender] = useState(0)
 
   // ── WebSocket ────────────────────────────────────────────────────────────────
@@ -63,7 +65,7 @@ export default function App() {
 
         case 'indicator_loaded': {
           const o = msg.indicator_output
-          chart.loadIndicator(o.indicator_id, o.plots)
+          chart.loadIndicator(o.indicator_id, o.plots, indicatorPaneRef.current[o.indicator_id] ?? 'price')
           setActiveInds(prev => {
             const filtered = prev.filter(i => i.id !== o.indicator_id)
             return [...filtered, { id: o.indicator_id, name: o.name, script: '' }]
@@ -74,6 +76,12 @@ export default function App() {
 
         case 'indicator_removed': {
           chart.removeIndicator(msg.indicator_id)
+          delete indicatorPaneRef.current[msg.indicator_id]
+          setHiddenInds(prev => {
+            const next = { ...prev }
+            delete next[msg.indicator_id]
+            return next
+          })
           setActiveInds(prev => prev.filter(i => i.id !== msg.indicator_id))
           forceRender(n => n + 1)
           break
@@ -98,6 +106,9 @@ export default function App() {
     const name   = formName.trim() || id
     const script = formScript.trim()
     if (!script) { setFormError('Script cannot be empty'); return }
+    const preset = PRESETS.find(p => p.id === formId.trim())
+      ?? PRESETS.find(p => p.script.trim() === script)
+    indicatorPaneRef.current[id] = preset?.pane ?? 'price'
     setFormError('')
     ws.send({ type: 'add_indicator', indicator: { id, name, script } })
     setFormId('')
@@ -108,6 +119,14 @@ export default function App() {
   const removeIndicator = useCallback((id: string) => {
     wsRef.current?.send({ type: 'remove_indicator', id })
   }, [])
+
+  const toggleIndicatorVisible = useCallback((id: string) => {
+    setHiddenInds(prev => {
+      const nextHidden = !prev[id]
+      chart.setIndicatorVisible(id, !nextHidden)
+      return { ...prev, [id]: nextHidden }
+    })
+  }, [chart])
 
   const loadPreset = useCallback((id: string) => {
     const p = PRESETS.find(x => x.id === id)
@@ -167,14 +186,17 @@ export default function App() {
           <div className="chart-legend">
             {activeInds.map(ind =>
               Object.entries(colours[ind.id] || {}).map(([plotName, colour]) => (
-                <div
+                <button
                   key={`${ind.id}:${plotName}`}
-                  className="legend-row"
+                  type="button"
+                  className={`legend-row ${hiddenInds[ind.id] ? 'hidden' : ''}`}
                   style={{ '--c': colour } as React.CSSProperties}
+                  onClick={() => toggleIndicatorVisible(ind.id)}
+                  title={`${hiddenInds[ind.id] ? 'Show' : 'Hide'} ${ind.name}`}
                 >
                   <div className="legend-dot" />
                   {ind.name}: {plotName}
-                </div>
+                </button>
               ))
             )}
           </div>
@@ -233,13 +255,16 @@ export default function App() {
                       </div>
                       <div className="ind-plots">
                         {Object.entries(indColours).map(([plotName, colour]) => (
-                          <span
+                          <button
                             key={plotName}
-                            className="plot-pill"
+                            type="button"
+                            className={`plot-pill ${hiddenInds[ind.id] ? 'hidden' : ''}`}
                             style={{ color: colour, borderColor: colour + '44' }}
+                            onClick={() => toggleIndicatorVisible(ind.id)}
+                            title={`${hiddenInds[ind.id] ? 'Show' : 'Hide'} ${ind.name}`}
                           >
                             {plotName}
-                          </span>
+                          </button>
                         ))}
                       </div>
                     </div>

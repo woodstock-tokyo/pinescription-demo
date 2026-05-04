@@ -183,6 +183,30 @@ plot(hlc3, title="hlc3")`
 	}
 }
 
+func TestPlotCollectorAdvancesBarIndexForWarmupNaN(t *testing.T) {
+	bars := testBars()
+	collector := newPlotCollector(bars)
+
+	if _, err := collector.capture(math.NaN(), "warmup"); err != nil {
+		t.Fatalf("capture NaN failed: %v", err)
+	}
+	if _, err := collector.capture(42.0, "warmup"); err != nil {
+		t.Fatalf("capture value failed: %v", err)
+	}
+
+	plots := collector.snapshot()
+	pts := plots["warmup"]
+	if len(pts) != 1 {
+		t.Fatalf("expected one drawable point after warmup, got %d", len(pts))
+	}
+	if pts[0].Time != bars[1].Time {
+		t.Fatalf("expected first drawable point at warmed-up bar time %d, got %d", bars[1].Time, pts[0].Time)
+	}
+	if !almostEqual(pts[0].Value, 42.0) {
+		t.Fatalf("expected value 42, got %f", pts[0].Value)
+	}
+}
+
 func mapKeys[K comparable, V any](m map[K]V) []K {
 	keys := make([]K, 0, len(m))
 	for k := range m {

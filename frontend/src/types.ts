@@ -32,6 +32,8 @@ export interface IndicatorScript {
   script: string
 }
 
+export type IndicatorPane = 'price' | 'separate'
+
 // ── Server → Client ──────────────────────────────────────────────────────────
 
 export type ServerMsg =

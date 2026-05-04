@@ -271,25 +271,23 @@ func valueFromBar(b Bar, valueType string) (float64, error) {
 }
 
 type plotCollector struct {
-	bars  []Bar
-	plots map[string][]PlotPoint
-	mu    sync.Mutex
+	bars          []Bar
+	plots         map[string][]PlotPoint
+	nextBarByPlot map[string]int
+	mu            sync.Mutex
 }
 
 func newPlotCollector(bs []Bar) *plotCollector {
 	return &plotCollector{
-		bars:  bs,
-		plots: make(map[string][]PlotPoint),
+		bars:          bs,
+		plots:         make(map[string][]PlotPoint),
+		nextBarByPlot: make(map[string]int),
 	}
 }
 
 func (c *plotCollector) capture(args ...interface{}) (interface{}, error) {
 	if len(args) < 1 {
 		return math.NaN(), errors.New("plot expects at least 1 argument")
-	}
-	v, ok := toFloat64(args[0])
-	if !ok || math.IsNaN(v) || math.IsInf(v, 0) {
-		return args[0], nil
 	}
 
 	name := "plot"
@@ -300,8 +298,14 @@ func (c *plotCollector) capture(args ...interface{}) (interface{}, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	barIdx := len(c.plots[name])
+	barIdx := c.nextBarByPlot[name]
+	c.nextBarByPlot[name] = barIdx + 1
 	if barIdx < 0 || barIdx >= len(c.bars) {
+		return args[0], nil
+	}
+
+	v, ok := toFloat64(args[0])
+	if !ok || math.IsNaN(v) || math.IsInf(v, 0) {
 		return args[0], nil
 	}
 
