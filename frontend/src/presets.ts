@@ -1,8 +1,11 @@
+import type { IndicatorPane } from './types'
+
 export interface Preset {
   id:          string
   name:        string
   description: string
   script:      string
+  pane?:       IndicatorPane
 }
 
 export const PRESETS: Preset[] = [
@@ -26,6 +29,7 @@ plot(ta.ema(close, 50), title="EMA 50")`,
     id: 'rsi_14',
     name: 'RSI 14',
     description: 'Relative Strength Index (14)',
+    pane: 'separate',
     script:
 `indicator("RSI 14")
 plot(ta.rsi(close, 14), title="RSI")`,
@@ -34,6 +38,7 @@ plot(ta.rsi(close, 14), title="RSI")`,
     id: 'macd',
     name: 'MACD',
     description: 'MACD (12, 26, 9)',
+    pane: 'separate',
     script:
 `indicator("MACD")
 [macdLine, signal, hist] = ta.macd(close, 12, 26, 9)
@@ -56,6 +61,7 @@ plot(lower, title="BB Lower")`,
     id: 'atr_14',
     name: 'ATR 14',
     description: 'Average True Range (14)',
+    pane: 'separate',
     script:
 `indicator("ATR 14")
 plot(ta.atr(14), title="ATR")`,
@@ -64,22 +70,25 @@ plot(ta.atr(14), title="ATR")`,
     id: 'cci_20',
     name: 'CCI 20',
     description: 'Commodity Channel Index (20)',
+    pane: 'separate',
     script:
 `indicator("CCI 20")
-plot(ta.cci(20), title="CCI")`,
+plot(ta.cci(hlc3, 20), title="CCI")`,
   },
   {
     id: 'mfi_14',
     name: 'MFI 14',
     description: 'Money Flow Index (14)',
+    pane: 'separate',
     script:
 `indicator("MFI 14")
-plot(ta.mfi(14), title="MFI")`,
+plot(ta.mfi(hlc3, 14), title="MFI")`,
   },
   {
     id: 'dmi_14',
     name: 'DMI',
     description: 'Directional Movement Index',
+    pane: 'separate',
     script:
 `indicator("DMI")
 [adx, diPlus, diMinus] = ta.dmi(14, 14)
@@ -102,6 +111,7 @@ plot(lower, title="KC Lower")`,
     id: 'roc_12',
     name: 'ROC 12',
     description: 'Rate of Change (12)',
+    pane: 'separate',
     script:
 `indicator("ROC 12")
 plot(ta.roc(close, 12), title="ROC")`,
@@ -110,6 +120,7 @@ plot(ta.roc(close, 12), title="ROC")`,
     id: 'stdev_20',
     name: 'Std Dev 20',
     description: 'Standard Deviation (20)',
+    pane: 'separate',
     script:
 `indicator("Std Dev 20")
 plot(ta.stdev(close, 20), title="StdDev")`,

@@ -39,10 +39,22 @@ type PlotPoint struct {
 	Value float64 `json:"value"`
 }
 
+type PlotRenderOptions struct {
+	Color        string   `json:"color,omitempty"`
+	LineWidth    int      `json:"linewidth,omitempty"`
+	LineStyle    int      `json:"linestyle,omitempty"`
+	TrackPrice   *bool    `json:"trackprice,omitempty"`
+	Display      *float64 `json:"display,omitempty"`
+	Format       string   `json:"format,omitempty"`
+	Precision    *int     `json:"precision,omitempty"`
+	ForceOverlay *bool    `json:"force_overlay,omitempty"`
+}
+
 type IndicatorOutput struct {
-	IndicatorID string                 `json:"indicator_id"`
-	Name        string                 `json:"name"`
-	Plots       map[string][]PlotPoint `json:"plots"`
+	IndicatorID string                       `json:"indicator_id"`
+	Name        string                       `json:"name"`
+	Plots       map[string][]PlotPoint       `json:"plots"`
+	PlotOptions map[string]PlotRenderOptions `json:"plot_options,omitempty"`
 }
 
 type IndicatorUpdate struct {
@@ -77,6 +89,25 @@ var (
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 		CheckOrigin:     func(_ *http.Request) bool { return true },
+	}
+
+	plotParamNames = []string{
+		"series",
+		"title",
+		"color",
+		"linewidth",
+		"style",
+		"trackprice",
+		"histbase",
+		"offset",
+		"join",
+		"editable",
+		"show_last",
+		"display",
+		"format",
+		"precision",
+		"force_overlay",
+		"linestyle",
 	}
 )
 
@@ -254,25 +285,25 @@ func valueFromBar(b Bar, valueType string) (float64, error) {
 }
 
 type plotCollector struct {
-	bars  []Bar
-	plots map[string][]PlotPoint
-	mu    sync.Mutex
+	bars          []Bar
+	plots         map[string][]PlotPoint
+	plotOptions   map[string]PlotRenderOptions
+	nextBarByPlot map[string]int
+	mu            sync.Mutex
 }
 
 func newPlotCollector(bs []Bar) *plotCollector {
 	return &plotCollector{
-		bars:  bs,
-		plots: make(map[string][]PlotPoint),
+		bars:          bs,
+		plots:         make(map[string][]PlotPoint),
+		plotOptions:   make(map[string]PlotRenderOptions),
+		nextBarByPlot: make(map[string]int),
 	}
 }
 
 func (c *plotCollector) capture(args ...interface{}) (interface{}, error) {
 	if len(args) < 1 {
-		return math.NaN(), errors.New("__plot_capture__ expects at least 1 argument")
-	}
-	v, ok := toFloat64(args[0])
-	if !ok || math.IsNaN(v) || math.IsInf(v, 0) {
-		return args[0], nil
+		return math.NaN(), errors.New("plot expects at least 1 argument")
 	}
 
 	name := "plot"
@@ -280,22 +311,23 @@ func (c *plotCollector) capture(args ...interface{}) (interface{}, error) {
 		name = toName(args[1], name)
 	}
 
-	barIdx := len(c.bars) - 1
-	if len(args) >= 3 {
-		if idx, ok := toInt(args[2]); ok {
-			barIdx = idx
-		}
-	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	barIdx := c.nextBarByPlot[name]
+	c.nextBarByPlot[name] = barIdx + 1
+	c.plotOptions[name] = plotOptionsFromArgs(args)
 	if barIdx < 0 || barIdx >= len(c.bars) {
 		return args[0], nil
 	}
 
-	point := PlotPoint{Time: c.bars[barIdx].Time, Value: v}
+	v, ok := toFloat64(args[0])
+	if !ok || math.IsNaN(v) || math.IsInf(v, 0) {
+		return args[0], nil
+	}
 
-	c.mu.Lock()
+	point := PlotPoint{Time: c.bars[barIdx].Time, Value: v}
 	c.plots[name] = append(c.plots[name], point)
-	c.mu.Unlock()
 
 	return args[0], nil
 }
@@ -311,6 +343,54 @@ func (c *plotCollector) snapshot() map[string][]PlotPoint {
 		out[name] = copied
 	}
 	return out
+}
+
+func (c *plotCollector) optionsSnapshot() map[string]PlotRenderOptions {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	out := make(map[string]PlotRenderOptions, len(c.plotOptions))
+	for name, options := range c.plotOptions {
+		out[name] = options
+	}
+	return out
+}
+
+func plotOptionsFromArgs(args []interface{}) PlotRenderOptions {
+	var options PlotRenderOptions
+	if len(args) > 2 {
+		options.Color = colorString(args[2])
+	}
+	if len(args) > 3 {
+		if width, ok := toInt(args[3]); ok && width > 0 {
+			options.LineWidth = width
+		}
+	}
+	if len(args) > 5 {
+		options.TrackPrice = boolOption(args[5])
+	}
+	if len(args) > 11 {
+		if display, ok := toFloat64(args[11]); ok {
+			options.Display = &display
+		}
+	}
+	if len(args) > 12 {
+		options.Format = toOptionalString(args[12])
+	}
+	if len(args) > 13 {
+		if precision, ok := toInt(args[13]); ok {
+			options.Precision = &precision
+		}
+	}
+	if len(args) > 14 {
+		options.ForceOverlay = boolOption(args[14])
+	}
+	if len(args) > 15 {
+		if style, ok := toInt(args[15]); ok {
+			options.LineStyle = style
+		}
+	}
+	return options
 }
 
 func normalizeScript(script string) (string, error) {
@@ -333,16 +413,6 @@ func normalizeScript(script string) (string, error) {
 		if line == "" || strings.HasPrefix(line, "//") {
 			continue
 		}
-
-		rewritten, changed, err := rewritePlotCalls(line)
-		if err != nil {
-			return "", err
-		}
-		if changed {
-			cleaned = append(cleaned, rewritten)
-			continue
-		}
-
 		cleaned = append(cleaned, line)
 	}
 
@@ -382,164 +452,6 @@ func stripLeadingCall(line, name string) (string, bool, error) {
 	return remainder, true, nil
 }
 
-func rewritePlotCalls(line string) (string, bool, error) {
-	rewritten := line
-	changed := false
-
-	for {
-		startIdx, openIdx, closeIdx, err := findTopLevelCall(rewritten, "plot")
-		if err != nil {
-			return "", changed, err
-		}
-		if startIdx < 0 {
-			break
-		}
-
-		replacement, err := rewritePlotInner(rewritten[openIdx+1 : closeIdx])
-		if err != nil {
-			return "", true, err
-		}
-
-		rewritten = rewritten[:startIdx] + replacement + rewritten[closeIdx+1:]
-		changed = true
-	}
-
-	return rewritten, changed, nil
-}
-
-func findTopLevelCall(s, name string) (startIdx, openIdx, closeIdx int, err error) {
-	parenDepth := 0
-	bracketDepth := 0
-	braceDepth := 0
-	var quote byte
-	escaped := false
-
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-
-		if quote != 0 {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if ch == '\\' {
-				escaped = true
-				continue
-			}
-			if ch == quote {
-				quote = 0
-			}
-			continue
-		}
-
-		if ch == '\'' || ch == '"' {
-			quote = ch
-			continue
-		}
-
-		if parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 && strings.HasPrefix(s[i:], name) {
-			beforeOK := i == 0 || (!isIdentifierByte(s[i-1]) && s[i-1] != '.')
-			afterName := i + len(name)
-			afterOK := afterName >= len(s) || !isIdentifierByte(s[afterName])
-
-			if beforeOK && afterOK {
-				j := afterName
-				for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
-					j++
-				}
-				if j < len(s) && s[j] == '(' {
-					matchedClose, matchErr := findMatchingParen(s, j)
-					if matchErr != nil {
-						return -1, -1, -1, matchErr
-					}
-					return i, j, matchedClose, nil
-				}
-			}
-		}
-
-		switch ch {
-		case '(':
-			parenDepth++
-		case ')':
-			if parenDepth > 0 {
-				parenDepth--
-			}
-		case '[':
-			bracketDepth++
-		case ']':
-			if bracketDepth > 0 {
-				bracketDepth--
-			}
-		case '{':
-			braceDepth++
-		case '}':
-			if braceDepth > 0 {
-				braceDepth--
-			}
-		}
-	}
-
-	return -1, -1, -1, nil
-}
-
-func isIdentifierByte(ch byte) bool {
-	return (ch >= 'a' && ch <= 'z') ||
-		(ch >= 'A' && ch <= 'Z') ||
-		(ch >= '0' && ch <= '9') ||
-		ch == '_'
-}
-
-func rewritePlotLine(line string) (string, bool, error) {
-	if !startsWithCall(line, "plot") {
-		return "", false, nil
-	}
-
-	inner, err := extractCallInner(line, "plot")
-	if err != nil {
-		return "", true, err
-	}
-
-	rewritten, err := rewritePlotInner(inner)
-	if err != nil {
-		return "", true, err
-	}
-
-	return rewritten, true, nil
-}
-
-func rewritePlotInner(inner string) (string, error) {
-
-	args := splitTopLevel(inner, ',')
-	if len(args) == 0 {
-		return "", errors.New("plot() requires at least one argument")
-	}
-
-	expr := strings.TrimSpace(args[0])
-	if expr == "" {
-		return "", errors.New("plot() first argument cannot be empty")
-	}
-
-	titleArg := strconv.Quote(expr)
-	for _, rawArg := range args[1:] {
-		arg := strings.TrimSpace(rawArg)
-		if arg == "" {
-			continue
-		}
-		if key, value, ok := splitNamedArg(arg); ok && key == "title" {
-			if strings.TrimSpace(value) != "" {
-				titleArg = strings.TrimSpace(value)
-			}
-			break
-		}
-		if isQuotedLiteral(arg) {
-			titleArg = arg
-			break
-		}
-	}
-
-	return fmt.Sprintf("__plot_capture__(%s, %s, bar_index)", expr, titleArg), nil
-}
-
 func startsWithCall(line, name string) bool {
 	if !strings.HasPrefix(line, name) {
 		return false
@@ -549,30 +461,6 @@ func startsWithCall(line, name string) bool {
 		i++
 	}
 	return i < len(line) && line[i] == '('
-}
-
-func extractCallInner(line, name string) (string, error) {
-	if !startsWithCall(line, name) {
-		return "", fmt.Errorf("line is not %s(...)", name)
-	}
-
-	openIdx := -1
-	for i := len(name); i < len(line); i++ {
-		if line[i] == '(' {
-			openIdx = i
-			break
-		}
-	}
-	if openIdx < 0 {
-		return "", fmt.Errorf("invalid %s(...) call", name)
-	}
-
-	closeIdx, err := findMatchingParen(line, openIdx)
-	if err != nil {
-		return "", err
-	}
-
-	return line[openIdx+1 : closeIdx], nil
 }
 
 func findMatchingParen(s string, openIdx int) (int, error) {
@@ -621,149 +509,6 @@ func findMatchingParen(s string, openIdx int) (int, error) {
 	return -1, errors.New("unmatched parentheses")
 }
 
-func splitTopLevel(s string, sep byte) []string {
-	parts := make([]string, 0, 4)
-	start := 0
-	parenDepth := 0
-	bracketDepth := 0
-	braceDepth := 0
-	var quote byte
-	escaped := false
-
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-
-		if quote != 0 {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if ch == '\\' {
-				escaped = true
-				continue
-			}
-			if ch == quote {
-				quote = 0
-			}
-			continue
-		}
-
-		if ch == '\'' || ch == '"' {
-			quote = ch
-			continue
-		}
-
-		switch ch {
-		case '(':
-			parenDepth++
-		case ')':
-			if parenDepth > 0 {
-				parenDepth--
-			}
-		case '[':
-			bracketDepth++
-		case ']':
-			if bracketDepth > 0 {
-				bracketDepth--
-			}
-		case '{':
-			braceDepth++
-		case '}':
-			if braceDepth > 0 {
-				braceDepth--
-			}
-		case sep:
-			if parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 {
-				parts = append(parts, strings.TrimSpace(s[start:i]))
-				start = i + 1
-			}
-		}
-	}
-
-	parts = append(parts, strings.TrimSpace(s[start:]))
-	return parts
-}
-
-func splitNamedArg(arg string) (string, string, bool) {
-	idx := indexTopLevelByte(arg, '=')
-	if idx <= 0 {
-		return "", "", false
-	}
-	key := strings.TrimSpace(arg[:idx])
-	value := strings.TrimSpace(arg[idx+1:])
-	if key == "" || value == "" {
-		return "", "", false
-	}
-	return key, value, true
-}
-
-func indexTopLevelByte(s string, target byte) int {
-	parenDepth := 0
-	bracketDepth := 0
-	braceDepth := 0
-	var quote byte
-	escaped := false
-
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-
-		if quote != 0 {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if ch == '\\' {
-				escaped = true
-				continue
-			}
-			if ch == quote {
-				quote = 0
-			}
-			continue
-		}
-
-		if ch == '\'' || ch == '"' {
-			quote = ch
-			continue
-		}
-
-		switch ch {
-		case '(':
-			parenDepth++
-		case ')':
-			if parenDepth > 0 {
-				parenDepth--
-			}
-		case '[':
-			bracketDepth++
-		case ']':
-			if bracketDepth > 0 {
-				bracketDepth--
-			}
-		case '{':
-			braceDepth++
-		case '}':
-			if braceDepth > 0 {
-				braceDepth--
-			}
-		case target:
-			if parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 {
-				return i
-			}
-		}
-	}
-
-	return -1
-}
-
-func isQuotedLiteral(s string) bool {
-	s = strings.TrimSpace(s)
-	if len(s) < 2 {
-		return false
-	}
-	return (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')
-}
-
 func toName(v interface{}, fallback string) string {
 	if v == nil {
 		return fallback
@@ -780,6 +525,85 @@ func toName(v interface{}, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+func toOptionalString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "<nil>" {
+		return ""
+	}
+	return s
+}
+
+func boolOption(v interface{}) *bool {
+	if v == nil {
+		return nil
+	}
+	switch x := v.(type) {
+	case bool:
+		return &x
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(x))
+		if err == nil {
+			return &parsed
+		}
+	}
+	if f, ok := toFloat64(v); ok {
+		parsed := f != 0
+		return &parsed
+	}
+	return nil
+}
+
+func colorString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	if base, ok := m["base"]; ok {
+		baseColor := colorString(base)
+		if baseColor == "" {
+			return ""
+		}
+		transp, _ := toFloat64(m["transp"])
+		alpha := math.Max(0, math.Min(1, 1-transp/100))
+		return hexWithAlpha(baseColor, alpha)
+	}
+	r, rok := toFloat64(m["r"])
+	g, gok := toFloat64(m["g"])
+	b, bok := toFloat64(m["b"])
+	if !rok || !gok || !bok {
+		return ""
+	}
+	return fmt.Sprintf("rgb(%d, %d, %d)", clampByte(r), clampByte(g), clampByte(b))
+}
+
+func clampByte(v float64) int {
+	return int(math.Max(0, math.Min(255, math.Round(v))))
+}
+
+func hexWithAlpha(color string, alpha float64) string {
+	if !strings.HasPrefix(color, "#") || len(color) != 7 {
+		return color
+	}
+	return fmt.Sprintf("rgba(%d, %d, %d, %.3f)", hexByte(color[1:3]), hexByte(color[3:5]), hexByte(color[5:7]), alpha)
+}
+
+func hexByte(s string) int {
+	v, err := strconv.ParseInt(s, 16, 64)
+	if err != nil {
+		return 0
+	}
+	return int(v)
 }
 
 func toFloat64(v interface{}) (float64, bool) {
@@ -894,14 +718,19 @@ func ensureRequiredValueTypes(provider *barProvider, required []string) error {
 }
 
 func evalScript(script string, bs []Bar) (map[string][]PlotPoint, error) {
+	plots, _, err := evalScriptWithOptions(script, bs)
+	return plots, err
+}
+
+func evalScriptWithOptions(script string, bs []Bar) (map[string][]PlotPoint, map[string]PlotRenderOptions, error) {
 	normalized, err := normalizeScript(script)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	provider := newBarProvider("DEMO", bs)
 	if err := ensureRequiredValueTypes(provider, requiredOHLCVValueTypes); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	collector := newPlotCollector(bs)
 
@@ -916,30 +745,33 @@ func evalScript(script string, bs []Bar) (map[string][]PlotPoint, error) {
 		engine.SetCurrentTime(time.Unix(bs[len(bs)-1].Time, 0).UTC())
 	}
 
-	engine.RegisterFunction("__plot_capture__", collector.capture)
+	if err := engine.RegisterFunctionWithParamNames("plot", plotParamNames, collector.capture); err != nil {
+		return nil, nil, fmt.Errorf("register plot function: %w", err)
+	}
 
 	bytecode, err := engine.Compile(normalized)
 	if err != nil {
-		return nil, fmt.Errorf("compile failed: %w", err)
+		return nil, nil, fmt.Errorf("compile failed: %w", err)
 	}
 
 	v, err := engine.Execute(bytecode)
 	if err != nil {
-		return nil, fmt.Errorf("execute failed: %w", err)
+		return nil, nil, fmt.Errorf("execute failed: %w", err)
 	}
 
 	plots := collector.snapshot()
+	plotOptions := collector.optionsSnapshot()
 	if len(plots) == 0 && len(bs) > 0 {
 		if fv, ok := toFloat64(v); ok && !math.IsNaN(fv) && !math.IsInf(fv, 0) {
 			plots["result"] = []PlotPoint{{Time: bs[len(bs)-1].Time, Value: fv}}
 		}
 	}
 
-	return plots, nil
+	return plots, plotOptions, nil
 }
 
 func evalIndicatorOutput(ind *IndicatorScript, bs []Bar) (*IndicatorOutput, error) {
-	plots, err := evalScript(ind.Script, bs)
+	plots, plotOptions, err := evalScriptWithOptions(ind.Script, bs)
 	if err != nil {
 		return nil, err
 	}
@@ -947,6 +779,7 @@ func evalIndicatorOutput(ind *IndicatorScript, bs []Bar) (*IndicatorOutput, erro
 		IndicatorID: ind.ID,
 		Name:        ind.Name,
 		Plots:       plots,
+		PlotOptions: plotOptions,
 	}, nil
 }
 

@@ -3,6 +3,8 @@ package main
 import (
 	"math"
 	"testing"
+
+	pine "github.com/woodstock-tokyo/pinescription"
 )
 
 func testBars() []Bar {
@@ -180,6 +182,153 @@ plot(hlc3, title="hlc3")`
 		if !almostEqual(hlc3Points[i].Value, wantHLC3) {
 			t.Fatalf("hlc3 bar %d: expected %f, got %f", i, wantHLC3, hlc3Points[i].Value)
 		}
+	}
+}
+
+func TestPlotCollectorAdvancesBarIndexForWarmupNaN(t *testing.T) {
+	bars := testBars()
+	collector := newPlotCollector(bars)
+
+	if _, err := collector.capture(math.NaN(), "warmup"); err != nil {
+		t.Fatalf("capture NaN failed: %v", err)
+	}
+	if _, err := collector.capture(42.0, "warmup"); err != nil {
+		t.Fatalf("capture value failed: %v", err)
+	}
+
+	plots := collector.snapshot()
+	pts := plots["warmup"]
+	if len(pts) != 1 {
+		t.Fatalf("expected one drawable point after warmup, got %d", len(pts))
+	}
+	if pts[0].Time != bars[1].Time {
+		t.Fatalf("expected first drawable point at warmed-up bar time %d, got %d", bars[1].Time, pts[0].Time)
+	}
+	if !almostEqual(pts[0].Value, 42.0) {
+		t.Fatalf("expected value 42, got %f", pts[0].Value)
+	}
+}
+
+func TestEvalScriptATRUsesHistoricalOHLCV(t *testing.T) {
+	bars := []Bar{
+		{Time: 1000, Open: 10, High: 12, Low: 9, Close: 11, Volume: 100},
+		{Time: 1060, Open: 11, High: 14, Low: 10, Close: 13, Volume: 100},
+		{Time: 1120, Open: 13, High: 15, Low: 12, Close: 14, Volume: 100},
+		{Time: 1180, Open: 14, High: 20, Low: 13, Close: 18, Volume: 100},
+	}
+	script := `indicator("ATR 3")
+plot(ta.atr(3), title="ATR")`
+
+	plots, err := evalScript(script, bars)
+	if err != nil {
+		t.Fatalf("evalScript failed: %v", err)
+	}
+
+	pts := plots["ATR"]
+	if len(pts) != 2 {
+		t.Fatalf("expected two ATR points after warmup, got %d", len(pts))
+	}
+	if pts[0].Time != bars[2].Time {
+		t.Fatalf("expected first ATR point at third bar time %d, got %d", bars[2].Time, pts[0].Time)
+	}
+	if !almostEqual(pts[0].Value, 10.0/3.0) {
+		t.Fatalf("expected first ATR value %f, got %f", 10.0/3.0, pts[0].Value)
+	}
+	if pts[1].Time != bars[3].Time {
+		t.Fatalf("expected second ATR point at fourth bar time %d, got %d", bars[3].Time, pts[1].Time)
+	}
+	if !almostEqual(pts[1].Value, 41.0/9.0) {
+		t.Fatalf("expected second ATR value %f, got %f", 41.0/9.0, pts[1].Value)
+	}
+}
+
+func TestPlotParamNamesBindKeywordArgsToLatestSignature(t *testing.T) {
+	bars := testBars()
+	provider := newBarProvider("DEMO", bars)
+	engine := pine.NewEngine()
+	engine.RegisterMarketDataProvider(provider)
+	engine.SetDefaultSymbol(provider.symbol)
+	engine.SetDefaultValueType("close")
+
+	var lastArgs []interface{}
+	if err := engine.RegisterFunctionWithParamNames("plot", plotParamNames, func(args ...interface{}) (interface{}, error) {
+		lastArgs = append([]interface{}(nil), args...)
+		return args[0], nil
+	}); err != nil {
+		t.Fatalf("register plot function: %v", err)
+	}
+
+	bytecode, err := engine.Compile(`plot(close, title="Close", format=format.price, precision=4, force_overlay=true, linestyle=line.style_dashed)`)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	if _, err := engine.Execute(bytecode); err != nil {
+		t.Fatalf("execute failed: %v", err)
+	}
+
+	if len(lastArgs) != len(plotParamNames) {
+		t.Fatalf("expected %d bound args, got %d: %#v", len(plotParamNames), len(lastArgs), lastArgs)
+	}
+	if title, ok := lastArgs[1].(string); !ok || title != "Close" {
+		t.Fatalf("title bound to arg[1] = %#v, want Close", lastArgs[1])
+	}
+	if format, ok := lastArgs[12].(string); !ok || format != "price" {
+		t.Fatalf("format bound to arg[12] = %#v, want price", lastArgs[12])
+	}
+	precision, ok := toFloat64(lastArgs[13])
+	if !ok || !almostEqual(precision, 4) {
+		t.Fatalf("precision bound to arg[13] = %#v, want 4", lastArgs[13])
+	}
+	forceOverlay, ok := lastArgs[14].(bool)
+	if !ok || !forceOverlay {
+		t.Fatalf("force_overlay bound to arg[14] = %#v, want true", lastArgs[14])
+	}
+	linestyle, ok := toFloat64(lastArgs[15])
+	if !ok || !almostEqual(linestyle, 1) {
+		t.Fatalf("linestyle bound to arg[15] = %#v, want line.style_dashed", lastArgs[15])
+	}
+}
+
+func TestEvalIndicatorOutputIncludesPlotRenderOptions(t *testing.T) {
+	ind := &IndicatorScript{
+		ID:   "styled",
+		Name: "Styled",
+		Script: `indicator("Styled")
+plot(close, title="Styled Close", color=color.red, linewidth=3, trackprice=true, display=display.all, format=format.price, precision=4, force_overlay=true, linestyle=line.style_dotted)`,
+	}
+
+	output, err := evalIndicatorOutput(ind, testBars())
+	if err != nil {
+		t.Fatalf("evalIndicatorOutput failed: %v", err)
+	}
+
+	options, ok := output.PlotOptions["Styled Close"]
+	if !ok {
+		t.Fatalf("expected plot options for Styled Close, got %#v", output.PlotOptions)
+	}
+	if options.Color != "#ff0000" {
+		t.Fatalf("color = %q, want #ff0000", options.Color)
+	}
+	if options.LineWidth != 3 {
+		t.Fatalf("linewidth = %d, want 3", options.LineWidth)
+	}
+	if options.LineStyle != 2 {
+		t.Fatalf("linestyle = %d, want line.style_dotted", options.LineStyle)
+	}
+	if options.TrackPrice == nil || !*options.TrackPrice {
+		t.Fatalf("trackprice = %#v, want true", options.TrackPrice)
+	}
+	if options.Display == nil || !almostEqual(*options.Display, 1) {
+		t.Fatalf("display = %#v, want display.all", options.Display)
+	}
+	if options.Format != "price" {
+		t.Fatalf("format = %q, want price", options.Format)
+	}
+	if options.Precision == nil || *options.Precision != 4 {
+		t.Fatalf("precision = %#v, want 4", options.Precision)
+	}
+	if options.ForceOverlay == nil || !*options.ForceOverlay {
+		t.Fatalf("force_overlay = %#v, want true", options.ForceOverlay)
 	}
 }
 
