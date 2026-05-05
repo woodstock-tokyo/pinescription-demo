@@ -31,6 +31,7 @@ export default function App() {
   const [formId,      setFormId]      = useState('')
   const [formName,    setFormName]    = useState('')
   const [formScript,  setFormScript]  = useState(PRESETS[0].script)
+  const [sourcePresetId, setSourcePresetId] = useState('')
   const [formError,   setFormError]   = useState('')
   const [hiddenInds,  setHiddenInds]  = useState<Record<string, boolean>>({})
   const [, forceRender] = useState(0)
@@ -99,22 +100,24 @@ export default function App() {
 
   // ── actions ──────────────────────────────────────────────────────────────────
 
-  const addIndicator = useCallback(() => {
+  const addIndicator = useCallback((paneOverride?: IndicatorPane) => {
     const ws = wsRef.current
     if (!ws) return
     const id     = formId.trim()   || `ind_${Date.now()}`
     const name   = formName.trim() || id
     const script = formScript.trim()
     if (!script) { setFormError('Script cannot be empty'); return }
+    const sourcePreset = PRESETS.find(p => p.id === sourcePresetId)
+    const isModifiedPresetScript = Boolean(sourcePreset && script !== sourcePreset.script.trim())
     const preset = PRESETS.find(p => p.id === formId.trim())
       ?? PRESETS.find(p => p.script.trim() === script)
-    indicatorPaneRef.current[id] = preset?.pane ?? 'price'
+    indicatorPaneRef.current[id] = paneOverride ?? (isModifiedPresetScript ? 'price' : preset?.pane ?? 'price')
     setFormError('')
     ws.send({ type: 'add_indicator', indicator: { id, name, script } })
     setFormId('')
     setFormName('')
     setActiveTab('active')
-  }, [formId, formName, formScript])
+  }, [formId, formName, formScript, sourcePresetId])
 
   const removeIndicator = useCallback((id: string) => {
     wsRef.current?.send({ type: 'remove_indicator', id })
@@ -134,6 +137,7 @@ export default function App() {
     setFormId(p.id)
     setFormName(p.name)
     setFormScript(p.script)
+    setSourcePresetId(p.id)
     setFormError('')
     setActiveTab('add')
   }, [])
@@ -145,6 +149,8 @@ export default function App() {
     : null
 
   const colours = getColourMap()
+  const sourcePreset = PRESETS.find(p => p.id === sourcePresetId)
+  const isModifiedPresetScript = Boolean(sourcePreset && formScript.trim() !== sourcePreset.script.trim())
 
   // ── render ───────────────────────────────────────────────────────────────────
 
@@ -328,13 +334,25 @@ export default function App() {
 
               {formError && <div className="err-msg">⚠ {formError}</div>}
 
-              <button
-                className="btn-add"
-                onClick={addIndicator}
-                disabled={!connected}
-              >
-                {connected ? 'Add to Chart' : 'Connecting…'}
-              </button>
+              <div className="add-actions">
+                <button
+                  className="btn-add"
+                  onClick={() => addIndicator()}
+                  disabled={!connected}
+                >
+                  {connected ? 'Add to Chart' : 'Connecting…'}
+                </button>
+                {isModifiedPresetScript && (
+                  <button
+                    className="btn-add btn-add-secondary"
+                    onClick={() => addIndicator('separate')}
+                    disabled={!connected}
+                    title={`Add modified ${sourcePreset?.name ?? 'preset'} script in its own pane`}
+                  >
+                    Add as Sub-chart
+                  </button>
+                )}
+              </div>
             </div>
           )}
 

@@ -21,6 +21,7 @@ const PALETTE = [
   '#ffeb3b', '#69f0ae', '#ff4081', '#40c4ff',
   '#b2ff59', '#ff6e40', '#ea80fc', '#18ffff',
 ]
+const RIGHT_PRICE_SCALE_MIN_WIDTH = 88
 
 // indicatorId → plotName → colour
 const colourMap: Record<string, Record<string, string>> = {}
@@ -76,7 +77,10 @@ function chartOptions() {
       horzLines: { color: '#1c2133' },
     },
     crosshair: { mode: CrosshairMode.Normal },
-    rightPriceScale: { borderColor: '#2a3350' },
+    rightPriceScale: {
+      borderColor: '#2a3350',
+      minimumWidth: RIGHT_PRICE_SCALE_MIN_WIDTH,
+    },
     timeScale: {
       borderColor: '#2a3350',
       timeVisible: true,

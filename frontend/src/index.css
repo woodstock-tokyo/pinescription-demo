@@ -353,6 +353,12 @@ html, body, #root {
 }
 .script-editor:focus { border-color: var(--accent-hi); }
 
+.add-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
 .btn-add {
   background: var(--accent);
   color: #fff;
@@ -368,6 +374,17 @@ html, body, #root {
 }
 .btn-add:hover    { opacity: .88; }
 .btn-add:disabled { opacity: .4; cursor: default; }
+
+.btn-add-secondary {
+  background: rgba(41,98,255,.12);
+  color: var(--accent-hi);
+  border: 1px solid rgba(92,138,255,.42);
+}
+
+.btn-add-secondary:hover {
+  background: rgba(41,98,255,.2);
+  opacity: 1;
+}
 
 .err-msg {
   font-size: 11px;
