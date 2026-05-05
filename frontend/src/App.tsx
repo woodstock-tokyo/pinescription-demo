@@ -66,7 +66,7 @@ export default function App() {
 
         case 'indicator_loaded': {
           const o = msg.indicator_output
-          chart.loadIndicator(o.indicator_id, o.plots, indicatorPaneRef.current[o.indicator_id] ?? 'price')
+          chart.loadIndicator(o.indicator_id, o.plots, indicatorPaneRef.current[o.indicator_id] ?? 'price', o.plot_options)
           setActiveInds(prev => {
             const filtered = prev.filter(i => i.id !== o.indicator_id)
             return [...filtered, { id: o.indicator_id, name: o.name, script: '' }]

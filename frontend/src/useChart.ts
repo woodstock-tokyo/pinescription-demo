@@ -3,6 +3,7 @@ import {
   createChart,
   ColorType,
   CrosshairMode,
+  LineStyle,
 } from 'lightweight-charts'
 import type {
   IChartApi,
@@ -13,7 +14,7 @@ import type {
   LogicalRange,
   WhitespaceData,
 } from 'lightweight-charts'
-import type { Bar, IndicatorPane, PlotPoint } from './types'
+import type { Bar, IndicatorPane, PlotPoint, PlotRenderOptions } from './types'
 
 // ── Colour palette ────────────────────────────────────────────────────────────
 const PALETTE = [
@@ -29,10 +30,10 @@ let colourIdx = 0
 
 export function getColourMap() { return colourMap }
 
-function assignColour(indId: string, plotName: string): string {
+function assignColour(indId: string, plotName: string, preferred?: string): string {
   if (!colourMap[indId]) colourMap[indId] = {}
   if (!colourMap[indId][plotName]) {
-    colourMap[indId][plotName] = PALETTE[colourIdx++ % PALETTE.length]
+    colourMap[indId][plotName] = preferred || PALETTE[colourIdx++ % PALETTE.length]
   }
   return colourMap[indId][plotName]
 }
@@ -46,7 +47,7 @@ export function clearColours(indId: string) {
 interface ChartHandle {
   loadHistory:         (bars: Bar[]) => void
   addBar:              (bar: Bar) => void
-  loadIndicator:       (indId: string, plots: Record<string, PlotPoint[]>, pane: IndicatorPane) => void
+  loadIndicator:       (indId: string, plots: Record<string, PlotPoint[]>, pane: IndicatorPane, plotOptions?: Record<string, PlotRenderOptions>) => void
   updateIndicatorTick: (indId: string, values: Record<string, number>, time: number) => void
   setIndicatorVisible: (indId: string, visible: boolean) => void
   removeIndicator:     (indId: string) => void
@@ -54,12 +55,13 @@ interface ChartHandle {
 
 type LineSeries = ISeriesApi<'Line'>
 type LineSeriesData = LineData | WhitespaceData
+type PlotSeriesEntry = { chart: IChartApi; series: LineSeries }
 
 interface IndicatorEntry {
   pane: IndicatorPane
   chart: IChartApi
   el?: HTMLDivElement
-  series: Record<string, LineSeries>
+  series: Record<string, PlotSeriesEntry>
   visible: boolean
   unsubscribeSync?: () => void
 }
@@ -106,6 +108,32 @@ function lineData(points: PlotPoint[], timeline?: UTCTimestamp[]): LineSeriesDat
   return [...leftPadding, ...values]
 }
 
+function lineWidth(width?: number): 1 | 2 | 3 | 4 {
+  if (!width || !isFinite(width)) return 2
+  return Math.min(4, Math.max(1, Math.round(width))) as 1 | 2 | 3 | 4
+}
+
+function lineStyle(style?: number): LineStyle {
+  if (style === 1) return LineStyle.Dashed
+  if (style === 2) return LineStyle.Dotted
+  return LineStyle.Solid
+}
+
+function priceFormat(options?: PlotRenderOptions): { type: 'price' | 'volume' | 'percent'; precision: number; minMove: number } | undefined {
+  const type = options?.format
+  if (type !== 'price' && type !== 'volume' && type !== 'percent') return undefined
+  const precision = options?.precision ?? (type === 'volume' ? 0 : 2)
+  return {
+    type,
+    precision,
+    minMove: 10 ** -Math.max(0, precision),
+  }
+}
+
+function isDisplayVisible(options?: PlotRenderOptions): boolean {
+  return options?.display === undefined || options.display !== 0
+}
+
 export function useChart(containerRef: React.RefObject<HTMLDivElement>): ChartHandle {
   const priceChartRef = useRef<IChartApi | null>(null)
   const candleRef     = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -136,7 +164,7 @@ export function useChart(containerRef: React.RefObject<HTMLDivElement>): ChartHa
   const removeIndicatorEntry = useCallback((indId: string) => {
     const entry = indicatorsRef.current[indId]
     if (!entry) return
-    Object.values(entry.series).forEach(series => entry.chart.removeSeries(series))
+    Object.values(entry.series).forEach(plot => plot.chart.removeSeries(plot.series))
     entry.unsubscribeSync?.()
     if (entry.pane === 'separate') {
       entry.chart.remove()
@@ -231,16 +259,18 @@ export function useChart(containerRef: React.RefObject<HTMLDivElement>): ChartHa
     })
   }, [])
 
-  const loadIndicator = useCallback((indId: string, plots: Record<string, PlotPoint[]>, pane: IndicatorPane) => {
+  const loadIndicator = useCallback((indId: string, plots: Record<string, PlotPoint[]>, pane: IndicatorPane, plotOptions: Record<string, PlotRenderOptions> = {}) => {
     const priceChart = priceChartRef.current
     const container = containerRef.current
     if (!priceChart || !container) return
 
     removeIndicatorEntry(indId)
 
-    const entry: IndicatorEntry = { pane, chart: priceChart, series: {}, visible: true }
+    const needsSeparatePane = pane === 'separate'
+      && Object.keys(plots).some(plotName => !plotOptions[plotName]?.force_overlay)
+    const entry: IndicatorEntry = { pane: needsSeparatePane ? 'separate' : 'price', chart: priceChart, series: {}, visible: true }
 
-    if (pane === 'separate') {
+    if (needsSeparatePane) {
       const subPane = document.createElement('div')
       subPane.className = 'chart-pane chart-pane-indicator'
       container.appendChild(subPane)
@@ -254,16 +284,21 @@ export function useChart(containerRef: React.RefObject<HTMLDivElement>): ChartHa
     }
 
     Object.entries(plots).forEach(([plotName, pts]) => {
-      const colour = assignColour(indId, plotName)
-      const ls = entry.chart.addLineSeries({
+      const options = plotOptions[plotName]
+      const targetChart = options?.force_overlay ? priceChart : entry.chart
+      const colour = assignColour(indId, plotName, options?.color)
+      const ls = targetChart.addLineSeries({
         color:             colour,
-        lineWidth:         2,
-        priceLineVisible:  false,
+        lineWidth:         lineWidth(options?.linewidth),
+        lineStyle:         lineStyle(options?.linestyle),
+        priceLineVisible:  options?.trackprice ?? false,
         lastValueVisible:  true,
         title:             plotName,
+        visible:           isDisplayVisible(options),
+        priceFormat:       priceFormat(options),
       })
-      ls.setData(lineData(pts, pane === 'separate' ? timelineRef.current : undefined))
-      entry.series[plotName] = ls
+      ls.setData(lineData(pts, targetChart === entry.chart && entry.pane === 'separate' ? timelineRef.current : undefined))
+      entry.series[plotName] = { chart: targetChart, series: ls }
     })
 
     indicatorsRef.current[indId] = entry
@@ -276,7 +311,7 @@ export function useChart(containerRef: React.RefObject<HTMLDivElement>): ChartHa
     Object.entries(values).forEach(([plotName, value]) => {
       const ls = entry.series[plotName]
       if (ls && isFinite(value)) {
-        ls.update({ time: time as UTCTimestamp, value })
+        ls.series.update({ time: time as UTCTimestamp, value })
       }
     })
   }, [])
@@ -285,8 +320,8 @@ export function useChart(containerRef: React.RefObject<HTMLDivElement>): ChartHa
     const entry = indicatorsRef.current[indId]
     if (!entry || entry.visible === visible) return
     entry.visible = visible
-    Object.values(entry.series).forEach(series => {
-      series.applyOptions({ visible })
+    Object.values(entry.series).forEach(plot => {
+      plot.series.applyOptions({ visible })
     })
     if (entry.el) entry.el.classList.toggle('chart-pane-hidden', !visible)
     resizeRef.current()

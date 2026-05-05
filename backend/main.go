@@ -39,10 +39,22 @@ type PlotPoint struct {
 	Value float64 `json:"value"`
 }
 
+type PlotRenderOptions struct {
+	Color        string   `json:"color,omitempty"`
+	LineWidth    int      `json:"linewidth,omitempty"`
+	LineStyle    int      `json:"linestyle,omitempty"`
+	TrackPrice   *bool    `json:"trackprice,omitempty"`
+	Display      *float64 `json:"display,omitempty"`
+	Format       string   `json:"format,omitempty"`
+	Precision    *int     `json:"precision,omitempty"`
+	ForceOverlay *bool    `json:"force_overlay,omitempty"`
+}
+
 type IndicatorOutput struct {
-	IndicatorID string                 `json:"indicator_id"`
-	Name        string                 `json:"name"`
-	Plots       map[string][]PlotPoint `json:"plots"`
+	IndicatorID string                       `json:"indicator_id"`
+	Name        string                       `json:"name"`
+	Plots       map[string][]PlotPoint       `json:"plots"`
+	PlotOptions map[string]PlotRenderOptions `json:"plot_options,omitempty"`
 }
 
 type IndicatorUpdate struct {
@@ -85,7 +97,6 @@ var (
 		"color",
 		"linewidth",
 		"style",
-		"transp",
 		"trackprice",
 		"histbase",
 		"offset",
@@ -93,7 +104,10 @@ var (
 		"editable",
 		"show_last",
 		"display",
-		"scale",
+		"format",
+		"precision",
+		"force_overlay",
+		"linestyle",
 	}
 )
 
@@ -273,6 +287,7 @@ func valueFromBar(b Bar, valueType string) (float64, error) {
 type plotCollector struct {
 	bars          []Bar
 	plots         map[string][]PlotPoint
+	plotOptions   map[string]PlotRenderOptions
 	nextBarByPlot map[string]int
 	mu            sync.Mutex
 }
@@ -281,6 +296,7 @@ func newPlotCollector(bs []Bar) *plotCollector {
 	return &plotCollector{
 		bars:          bs,
 		plots:         make(map[string][]PlotPoint),
+		plotOptions:   make(map[string]PlotRenderOptions),
 		nextBarByPlot: make(map[string]int),
 	}
 }
@@ -300,6 +316,7 @@ func (c *plotCollector) capture(args ...interface{}) (interface{}, error) {
 
 	barIdx := c.nextBarByPlot[name]
 	c.nextBarByPlot[name] = barIdx + 1
+	c.plotOptions[name] = plotOptionsFromArgs(args)
 	if barIdx < 0 || barIdx >= len(c.bars) {
 		return args[0], nil
 	}
@@ -326,6 +343,54 @@ func (c *plotCollector) snapshot() map[string][]PlotPoint {
 		out[name] = copied
 	}
 	return out
+}
+
+func (c *plotCollector) optionsSnapshot() map[string]PlotRenderOptions {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	out := make(map[string]PlotRenderOptions, len(c.plotOptions))
+	for name, options := range c.plotOptions {
+		out[name] = options
+	}
+	return out
+}
+
+func plotOptionsFromArgs(args []interface{}) PlotRenderOptions {
+	var options PlotRenderOptions
+	if len(args) > 2 {
+		options.Color = colorString(args[2])
+	}
+	if len(args) > 3 {
+		if width, ok := toInt(args[3]); ok && width > 0 {
+			options.LineWidth = width
+		}
+	}
+	if len(args) > 5 {
+		options.TrackPrice = boolOption(args[5])
+	}
+	if len(args) > 11 {
+		if display, ok := toFloat64(args[11]); ok {
+			options.Display = &display
+		}
+	}
+	if len(args) > 12 {
+		options.Format = toOptionalString(args[12])
+	}
+	if len(args) > 13 {
+		if precision, ok := toInt(args[13]); ok {
+			options.Precision = &precision
+		}
+	}
+	if len(args) > 14 {
+		options.ForceOverlay = boolOption(args[14])
+	}
+	if len(args) > 15 {
+		if style, ok := toInt(args[15]); ok {
+			options.LineStyle = style
+		}
+	}
+	return options
 }
 
 func normalizeScript(script string) (string, error) {
@@ -462,6 +527,85 @@ func toName(v interface{}, fallback string) string {
 	return s
 }
 
+func toOptionalString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "<nil>" {
+		return ""
+	}
+	return s
+}
+
+func boolOption(v interface{}) *bool {
+	if v == nil {
+		return nil
+	}
+	switch x := v.(type) {
+	case bool:
+		return &x
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(x))
+		if err == nil {
+			return &parsed
+		}
+	}
+	if f, ok := toFloat64(v); ok {
+		parsed := f != 0
+		return &parsed
+	}
+	return nil
+}
+
+func colorString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	if base, ok := m["base"]; ok {
+		baseColor := colorString(base)
+		if baseColor == "" {
+			return ""
+		}
+		transp, _ := toFloat64(m["transp"])
+		alpha := math.Max(0, math.Min(1, 1-transp/100))
+		return hexWithAlpha(baseColor, alpha)
+	}
+	r, rok := toFloat64(m["r"])
+	g, gok := toFloat64(m["g"])
+	b, bok := toFloat64(m["b"])
+	if !rok || !gok || !bok {
+		return ""
+	}
+	return fmt.Sprintf("rgb(%d, %d, %d)", clampByte(r), clampByte(g), clampByte(b))
+}
+
+func clampByte(v float64) int {
+	return int(math.Max(0, math.Min(255, math.Round(v))))
+}
+
+func hexWithAlpha(color string, alpha float64) string {
+	if !strings.HasPrefix(color, "#") || len(color) != 7 {
+		return color
+	}
+	return fmt.Sprintf("rgba(%d, %d, %d, %.3f)", hexByte(color[1:3]), hexByte(color[3:5]), hexByte(color[5:7]), alpha)
+}
+
+func hexByte(s string) int {
+	v, err := strconv.ParseInt(s, 16, 64)
+	if err != nil {
+		return 0
+	}
+	return int(v)
+}
+
 func toFloat64(v interface{}) (float64, bool) {
 	switch x := v.(type) {
 	case float64:
@@ -574,14 +718,19 @@ func ensureRequiredValueTypes(provider *barProvider, required []string) error {
 }
 
 func evalScript(script string, bs []Bar) (map[string][]PlotPoint, error) {
+	plots, _, err := evalScriptWithOptions(script, bs)
+	return plots, err
+}
+
+func evalScriptWithOptions(script string, bs []Bar) (map[string][]PlotPoint, map[string]PlotRenderOptions, error) {
 	normalized, err := normalizeScript(script)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	provider := newBarProvider("DEMO", bs)
 	if err := ensureRequiredValueTypes(provider, requiredOHLCVValueTypes); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	collector := newPlotCollector(bs)
 
@@ -597,31 +746,32 @@ func evalScript(script string, bs []Bar) (map[string][]PlotPoint, error) {
 	}
 
 	if err := engine.RegisterFunctionWithParamNames("plot", plotParamNames, collector.capture); err != nil {
-		return nil, fmt.Errorf("register plot function: %w", err)
+		return nil, nil, fmt.Errorf("register plot function: %w", err)
 	}
 
 	bytecode, err := engine.Compile(normalized)
 	if err != nil {
-		return nil, fmt.Errorf("compile failed: %w", err)
+		return nil, nil, fmt.Errorf("compile failed: %w", err)
 	}
 
 	v, err := engine.Execute(bytecode)
 	if err != nil {
-		return nil, fmt.Errorf("execute failed: %w", err)
+		return nil, nil, fmt.Errorf("execute failed: %w", err)
 	}
 
 	plots := collector.snapshot()
+	plotOptions := collector.optionsSnapshot()
 	if len(plots) == 0 && len(bs) > 0 {
 		if fv, ok := toFloat64(v); ok && !math.IsNaN(fv) && !math.IsInf(fv, 0) {
 			plots["result"] = []PlotPoint{{Time: bs[len(bs)-1].Time, Value: fv}}
 		}
 	}
 
-	return plots, nil
+	return plots, plotOptions, nil
 }
 
 func evalIndicatorOutput(ind *IndicatorScript, bs []Bar) (*IndicatorOutput, error) {
-	plots, err := evalScript(ind.Script, bs)
+	plots, plotOptions, err := evalScriptWithOptions(ind.Script, bs)
 	if err != nil {
 		return nil, err
 	}
@@ -629,6 +779,7 @@ func evalIndicatorOutput(ind *IndicatorScript, bs []Bar) (*IndicatorOutput, erro
 		IndicatorID: ind.ID,
 		Name:        ind.Name,
 		Plots:       plots,
+		PlotOptions: plotOptions,
 	}, nil
 }
 

@@ -14,10 +14,22 @@ export interface PlotPoint {
   value: number
 }
 
+export interface PlotRenderOptions {
+  color?:         string
+  linewidth?:     number
+  linestyle?:     number
+  trackprice?:    boolean
+  display?:       number
+  format?:        string
+  precision?:     number
+  force_overlay?: boolean
+}
+
 export interface IndicatorOutput {
   indicator_id: string
   name:         string
   plots:        Record<string, PlotPoint[]>  // plot-name → series
+  plot_options?: Record<string, PlotRenderOptions>
 }
 
 export interface IndicatorUpdate {
