@@ -348,7 +348,6 @@ func normalizeScript(script string) (string, error) {
 		if line == "" || strings.HasPrefix(line, "//") {
 			continue
 		}
-
 		cleaned = append(cleaned, line)
 	}
 

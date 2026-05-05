@@ -61,6 +61,7 @@ plot(lower, title="BB Lower")`,
     id: 'atr_14',
     name: 'ATR 14',
     description: 'Average True Range (14)',
+    pane: 'separate',
     script:
 `indicator("ATR 14")
 plot(ta.atr(14), title="ATR")`,

@@ -207,6 +207,39 @@ func TestPlotCollectorAdvancesBarIndexForWarmupNaN(t *testing.T) {
 	}
 }
 
+func TestEvalScriptATRUsesHistoricalOHLCV(t *testing.T) {
+	bars := []Bar{
+		{Time: 1000, Open: 10, High: 12, Low: 9, Close: 11, Volume: 100},
+		{Time: 1060, Open: 11, High: 14, Low: 10, Close: 13, Volume: 100},
+		{Time: 1120, Open: 13, High: 15, Low: 12, Close: 14, Volume: 100},
+		{Time: 1180, Open: 14, High: 20, Low: 13, Close: 18, Volume: 100},
+	}
+	script := `indicator("ATR 3")
+plot(ta.atr(3), title="ATR")`
+
+	plots, err := evalScript(script, bars)
+	if err != nil {
+		t.Fatalf("evalScript failed: %v", err)
+	}
+
+	pts := plots["ATR"]
+	if len(pts) != 2 {
+		t.Fatalf("expected two ATR points after warmup, got %d", len(pts))
+	}
+	if pts[0].Time != bars[2].Time {
+		t.Fatalf("expected first ATR point at third bar time %d, got %d", bars[2].Time, pts[0].Time)
+	}
+	if !almostEqual(pts[0].Value, 10.0/3.0) {
+		t.Fatalf("expected first ATR value %f, got %f", 10.0/3.0, pts[0].Value)
+	}
+	if pts[1].Time != bars[3].Time {
+		t.Fatalf("expected second ATR point at fourth bar time %d, got %d", bars[3].Time, pts[1].Time)
+	}
+	if !almostEqual(pts[1].Value, 41.0/9.0) {
+		t.Fatalf("expected second ATR value %f, got %f", 41.0/9.0, pts[1].Value)
+	}
+}
+
 func mapKeys[K comparable, V any](m map[K]V) []K {
 	keys := make([]K, 0, len(m))
 	for k := range m {
