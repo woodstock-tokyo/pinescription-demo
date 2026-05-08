@@ -96,6 +96,9 @@ plot(signalLine, "Signal", color=#FF9800)
 plot(hist, "Histogram", color=#4CAF50)
 ```
 
+### Larger Example Script
+check `example.pine` in the root folder
+
 ## Supported Functions
 
 | Function | Description |

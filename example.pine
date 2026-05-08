@@ -1,0 +1,60 @@
+//@version=6
+indicator("Research Alpha Subset", shorttitle = "INTC RAlpha Subset", overlay = false)
+
+// ------------------------------------------------------------
+// Formula definitions
+// ------------------------------------------------------------
+
+// RAlpha21_Drawdown60_Bounce
+// Python:
+// (MAX60 - CLOSE) / MAX60 * RELVOL60
+max60 = ta.highest(close, 60)
+rAlpha21_Drawdown60_Bounce = ((max60 - close) / max60) * (volume / ta.sma(volume, 60))
+
+// RAlpha18_RSI2_Oversold
+// Python:
+// 100 - RSI2
+rAlpha18_RSI2_Oversold = 100.0 - ta.rsi(close, 2)
+
+// RAlpha22_PanicSell_Reversal
+// Python:
+// -RET1 * RELVOL20 * I(CLOSE < MA20)
+ret1 = close / close[1] - 1.0
+ma20 = ta.sma(close, 20)
+rAlpha22_PanicSell_Reversal = -ret1 * (volume / ta.sma(volume, 20)) * (close < ma20 ? 1.0 : 0.0)
+
+// RAlpha20_Drawdown20_Bounce
+// Python:
+// (MAX20 - CLOSE) / MAX20 * RELVOL20
+max20 = ta.highest(close, 20)
+rAlpha20_Drawdown20_Bounce = ((max20 - close) / max20) * (volume / ta.sma(volume, 20))
+
+// RAlpha03_Ret5_Ret20Accel
+// Python:
+// RET5 - RET20 / 4
+ret5 = close / close[5] - 1.0
+ret20 = close / close[20] - 1.0
+rAlpha03_Ret5_Ret20Accel = ret5 - ret20 / 4.0
+
+// Alpha29
+// Python:
+// 6-day return * VOLUME
+ret6 = close / close[6] - 1.0
+alpha29 = ret6 * volume
+
+// RAlpha19_RSI5_Oversold
+// Python:
+// 100 - RSI5
+rAlpha19_RSI5_Oversold = 100.0 - ta.rsi(close, 5)
+
+// ------------------------------------------------------------
+// Plots
+// ------------------------------------------------------------
+
+plot(rAlpha21_Drawdown60_Bounce, title = "RAlpha21 Drawdown60 Bounce", linewidth = 2)
+plot(rAlpha18_RSI2_Oversold, title = "RAlpha18 RSI2 Oversold", linewidth = 2)
+plot(rAlpha22_PanicSell_Reversal, title = "RAlpha22 Panic Sell Reversal", linewidth = 2)
+plot(rAlpha20_Drawdown20_Bounce, title = "RAlpha20 Drawdown20 Bounce", linewidth = 2)
+plot(rAlpha03_Ret5_Ret20Accel, title = "RAlpha03 Ret5 Ret20 Accel", linewidth = 2)
+plot(alpha29, title = "Alpha29 6D Return x Volume", linewidth = 2)
+plot(rAlpha19_RSI5_Oversold, title = "RAlpha19 RSI5 Oversold", linewidth = 2)
