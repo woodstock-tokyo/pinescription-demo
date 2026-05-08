@@ -28,6 +28,7 @@ export interface PlotRenderOptions {
 export interface IndicatorOutput {
   indicator_id: string
   name:         string
+  overlay:      boolean
   plots:        Record<string, PlotPoint[]>  // plot-name → series
   plot_options?: Record<string, PlotRenderOptions>
 }

@@ -332,6 +332,93 @@ plot(close, title="Styled Close", color=color.red, linewidth=3, trackprice=true,
 	}
 }
 
+func TestIndicatorOverlayParsesScriptDeclaration(t *testing.T) {
+	cases := []struct {
+		name   string
+		script string
+		want   bool
+	}{
+		{
+			name: "keyword true",
+			script: `//@version=6
+indicator("Overlay", overlay=true)
+plot(close)`,
+			want: true,
+		},
+		{
+			name: "keyword false with spaces",
+			script: `indicator("Separate", shorttitle = "Sep", overlay = false)
+plot(close)`,
+			want: false,
+		},
+		{
+			name: "positional third argument",
+			script: `indicator("Overlay", "Ov", true)
+plot(close)`,
+			want: true,
+		},
+		{
+			name: "multiline keyword true",
+			script: `indicator(
+    "Overlay",
+    shorttitle = "Ov",
+    overlay = true
+)
+plot(close)`,
+			want: true,
+		},
+		{
+			name: "default false when omitted",
+			script: `indicator("Default Separate")
+plot(close)`,
+			want: false,
+		},
+		{
+			name:   "default false without declaration",
+			script: `plot(close)`,
+			want:   false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := indicatorOverlay(tc.script); got != tc.want {
+				t.Fatalf("indicatorOverlay() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEvalScriptSupportsMultilineIndicatorDeclaration(t *testing.T) {
+	plots, err := evalScript(`indicator(
+    "Overlay",
+    shorttitle = "Ov",
+    overlay = true
+)
+plot(close, title="Close")`, testBars())
+	if err != nil {
+		t.Fatalf("evalScript failed: %v", err)
+	}
+	if _, ok := plots["Close"]; !ok {
+		t.Fatalf("expected plot Close, got keys: %v", mapKeys(plots))
+	}
+}
+
+func TestEvalIndicatorOutputIncludesOverlayMetadata(t *testing.T) {
+	output, err := evalIndicatorOutput(&IndicatorScript{
+		ID:   "overlay",
+		Name: "Overlay",
+		Script: `indicator("Overlay", overlay=true)
+plot(close, title="Close")`,
+	}, testBars())
+	if err != nil {
+		t.Fatalf("evalIndicatorOutput failed: %v", err)
+	}
+	if !output.Overlay {
+		t.Fatalf("overlay = false, want true")
+	}
+}
+
 func mapKeys[K comparable, V any](m map[K]V) []K {
 	keys := make([]K, 0, len(m))
 	for k := range m {

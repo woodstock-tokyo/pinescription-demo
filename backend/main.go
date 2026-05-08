@@ -53,6 +53,7 @@ type PlotRenderOptions struct {
 type IndicatorOutput struct {
 	IndicatorID string                       `json:"indicator_id"`
 	Name        string                       `json:"name"`
+	Overlay     bool                         `json:"overlay"`
 	Plots       map[string][]PlotPoint       `json:"plots"`
 	PlotOptions map[string]PlotRenderOptions `json:"plot_options,omitempty"`
 }
@@ -402,18 +403,14 @@ func normalizeScript(script string) (string, error) {
 		if line == "" || strings.HasPrefix(line, "//") {
 			continue
 		}
-
-		stripped, strippedIndicator, err := stripLeadingCall(line, "indicator")
-		if err != nil {
-			return "", err
+		// split line by ; into lines and trim each part, ignoring empty parts
+		parts := strings.Split(line, ";")
+		for _, part := range parts {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				cleaned = append(cleaned, trimmed)
+			}
 		}
-		if strippedIndicator {
-			line = stripped
-		}
-		if line == "" || strings.HasPrefix(line, "//") {
-			continue
-		}
-		cleaned = append(cleaned, line)
 	}
 
 	if len(cleaned) == 0 {
@@ -421,6 +418,216 @@ func normalizeScript(script string) (string, error) {
 	}
 
 	return strings.Join(cleaned, "\n"), nil
+}
+
+func indicatorOverlay(script string) bool {
+	const pineDefaultOverlay = false
+
+	call, ok, err := leadingCallText(script, "indicator")
+	if err != nil || !ok {
+		return pineDefaultOverlay
+	}
+
+	openIdx := strings.IndexByte(call, '(')
+	if openIdx < 0 {
+		return pineDefaultOverlay
+	}
+	closeIdx, err := findMatchingParen(call, openIdx)
+	if err != nil {
+		return pineDefaultOverlay
+	}
+
+	args := splitTopLevelArgs(call[openIdx+1 : closeIdx])
+	positional := 0
+	for _, arg := range args {
+		key, value, hasKey := splitKeywordArg(arg)
+		if hasKey {
+			if strings.EqualFold(strings.TrimSpace(key), "overlay") {
+				return parseBoolLiteral(value, pineDefaultOverlay)
+			}
+			continue
+		}
+
+		positional++
+		if positional == 3 {
+			return parseBoolLiteral(arg, pineDefaultOverlay)
+		}
+	}
+
+	return pineDefaultOverlay
+}
+
+func stripLeadingCallFromScript(script, name string) (string, error) {
+	callStart, openIdx, ok := leadingCallBounds(script, name)
+	if !ok {
+		return script, nil
+	}
+
+	closeIdx, err := findMatchingParen(script, openIdx)
+	if err != nil {
+		return "", err
+	}
+
+	remainder := strings.TrimSpace(script[closeIdx+1:])
+	if strings.HasPrefix(remainder, ";") {
+		remainder = strings.TrimSpace(remainder[1:])
+	}
+
+	return script[:callStart] + remainder, nil
+}
+
+func leadingCallText(script, name string) (string, bool, error) {
+	_, openIdx, ok := leadingCallBounds(script, name)
+	if !ok {
+		return "", false, nil
+	}
+
+	closeIdx, err := findMatchingParen(script, openIdx)
+	if err != nil {
+		return "", false, err
+	}
+
+	start := openIdx
+	for start > 0 && (script[start-1] == ' ' || script[start-1] == '\t') {
+		start--
+	}
+	for start > 0 && isIdentifierByte(script[start-1]) {
+		start--
+	}
+
+	return script[start : closeIdx+1], true, nil
+}
+
+func leadingCallBounds(script, name string) (int, int, bool) {
+	offset := 0
+	for _, rawLine := range strings.SplitAfter(script, "\n") {
+		line := strings.TrimRight(rawLine, "\r\n")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+			offset += len(rawLine)
+			continue
+		}
+		if !startsWithCall(trimmed, name) {
+			return 0, 0, false
+		}
+
+		lineBody := strings.TrimLeft(line, " \t")
+		callStart := offset + len(line) - len(lineBody)
+		openInTrimmed := strings.IndexByte(trimmed, '(')
+		if openInTrimmed < 0 {
+			return 0, 0, false
+		}
+		return callStart, callStart + openInTrimmed, true
+	}
+
+	return 0, 0, false
+}
+
+func isIdentifierByte(ch byte) bool {
+	return ch == '_' || ch >= '0' && ch <= '9' || ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z'
+}
+
+func splitTopLevelArgs(s string) []string {
+	args := []string{}
+	start := 0
+	depth := 0
+	var quote byte
+	escaped := false
+
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+
+		if ch == '\'' || ch == '"' {
+			quote = ch
+			continue
+		}
+
+		switch ch {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				args = append(args, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+
+	last := strings.TrimSpace(s[start:])
+	if last != "" || len(args) > 0 {
+		args = append(args, last)
+	}
+	return args
+}
+
+func splitKeywordArg(arg string) (string, string, bool) {
+	depth := 0
+	var quote byte
+	escaped := false
+
+	for i := 0; i < len(arg); i++ {
+		ch := arg[i]
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+
+		if ch == '\'' || ch == '"' {
+			quote = ch
+			continue
+		}
+
+		switch ch {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		case '=':
+			if depth == 0 {
+				return strings.TrimSpace(arg[:i]), strings.TrimSpace(arg[i+1:]), true
+			}
+		}
+	}
+
+	return "", "", false
+}
+
+func parseBoolLiteral(s string, fallback bool) bool {
+	parsed, err := strconv.ParseBool(strings.Trim(strings.TrimSpace(s), "'\""))
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func stripLeadingCall(line, name string) (string, bool, error) {
@@ -778,6 +985,7 @@ func evalIndicatorOutput(ind *IndicatorScript, bs []Bar) (*IndicatorOutput, erro
 	return &IndicatorOutput{
 		IndicatorID: ind.ID,
 		Name:        ind.Name,
+		Overlay:     indicatorOverlay(ind.Script),
 		Plots:       plots,
 		PlotOptions: plotOptions,
 	}, nil

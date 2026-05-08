@@ -66,7 +66,8 @@ export default function App() {
 
         case 'indicator_loaded': {
           const o = msg.indicator_output
-          chart.loadIndicator(o.indicator_id, o.plots, indicatorPaneRef.current[o.indicator_id] ?? 'price', o.plot_options)
+          const detectedPane: IndicatorPane = o.overlay ? 'price' : 'separate'
+          chart.loadIndicator(o.indicator_id, o.plots, indicatorPaneRef.current[o.indicator_id] ?? detectedPane, o.plot_options)
           setActiveInds(prev => {
             const filtered = prev.filter(i => i.id !== o.indicator_id)
             return [...filtered, { id: o.indicator_id, name: o.name, script: '' }]
@@ -107,11 +108,11 @@ export default function App() {
     const name   = formName.trim() || id
     const script = formScript.trim()
     if (!script) { setFormError('Script cannot be empty'); return }
-    const sourcePreset = PRESETS.find(p => p.id === sourcePresetId)
-    const isModifiedPresetScript = Boolean(sourcePreset && script !== sourcePreset.script.trim())
-    const preset = PRESETS.find(p => p.id === formId.trim())
-      ?? PRESETS.find(p => p.script.trim() === script)
-    indicatorPaneRef.current[id] = paneOverride ?? (isModifiedPresetScript ? 'price' : preset?.pane ?? 'price')
+    if (paneOverride) {
+      indicatorPaneRef.current[id] = paneOverride
+    } else {
+      delete indicatorPaneRef.current[id]
+    }
     setFormError('')
     ws.send({ type: 'add_indicator', indicator: { id, name, script } })
     setFormId('')
