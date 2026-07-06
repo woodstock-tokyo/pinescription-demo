@@ -130,8 +130,6 @@ The demo still uses the same preset → WebSocket → backend evaluation → cha
 3. Registered runtime hooks collect plot output and drawing-object output generically.
 4. The frontend renders captured drawings as an SVG overlay and dashboard table on the price pane.
 
-The backend intentionally does not special-case the indicator title or implement the heatmap algorithm in Go. Regression tests mutate the original script title before evaluation to ensure the script executes through the generic runtime path.
-
 ## Supported Functions
 
 | Function | Description |
