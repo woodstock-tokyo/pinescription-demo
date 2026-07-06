@@ -4,7 +4,7 @@ go 1.25.6
 
 require (
 	github.com/gorilla/websocket v1.5.3
-	github.com/woodstock-tokyo/pinescription v0.0.0-20260508100511-a9cd1fc48904
+	github.com/woodstock-tokyo/pinescription v0.0.0-20260706073641-8befce27eba3
 )
 
 require gonum.org/v1/gonum v0.17.0 // indirect

@@ -1,4 +1,5 @@
 import type { IndicatorPane } from './types'
+import volumetricRegressionHeatmapScript from '../../example2.pine?raw'
 
 export interface Preset {
   id:          string
@@ -9,6 +10,12 @@ export interface Preset {
 }
 
 export const PRESETS: Preset[] = [
+  {
+    id: 'volumetric_regression_heatmap',
+    name: 'Volumetric Regression Heatmap',
+    description: 'LuxAlgo-style regression channel heatmap with volume profile and delta bands',
+    script: volumetricRegressionHeatmapScript,
+  },
   {
     id: 'sma_20',
     name: 'SMA 20',

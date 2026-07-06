@@ -50,12 +50,62 @@ type PlotRenderOptions struct {
 	ForceOverlay *bool    `json:"force_overlay,omitempty"`
 }
 
+type DrawingPoint struct {
+	Time  int64   `json:"time"`
+	Value float64 `json:"value"`
+}
+
+type DrawingPolyline struct {
+	Points    []DrawingPoint `json:"points"`
+	Color     string         `json:"color"`
+	LineWidth int            `json:"line_width"`
+	Opacity   float64        `json:"opacity,omitempty"`
+}
+
+type DrawingBox struct {
+	Left        int64   `json:"left"`
+	Right       int64   `json:"right"`
+	Top         float64 `json:"top"`
+	Bottom      float64 `json:"bottom"`
+	Color       string  `json:"color"`
+	BorderColor string  `json:"border_color,omitempty"`
+	Opacity     float64 `json:"opacity,omitempty"`
+}
+
+type DrawingLabel struct {
+	Time  int64   `json:"time"`
+	Value float64 `json:"value"`
+	Color string  `json:"color"`
+	Size  int     `json:"size,omitempty"`
+}
+
+type DashboardRow struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+	Color string `json:"color,omitempty"`
+}
+
+type DrawingDashboard struct {
+	Title    string         `json:"title"`
+	Rows     []DashboardRow `json:"rows"`
+	Position string         `json:"position,omitempty"`
+	Size     string         `json:"size,omitempty"`
+}
+
+type DrawingOutput struct {
+	Polylines []DrawingPolyline `json:"polylines,omitempty"`
+	Boxes     []DrawingBox      `json:"boxes,omitempty"`
+	Labels    []DrawingLabel    `json:"labels,omitempty"`
+	Dashboard *DrawingDashboard `json:"dashboard,omitempty"`
+}
+
 type IndicatorOutput struct {
 	IndicatorID string                       `json:"indicator_id"`
 	Name        string                       `json:"name"`
 	Overlay     bool                         `json:"overlay"`
 	Plots       map[string][]PlotPoint       `json:"plots"`
 	PlotOptions map[string]PlotRenderOptions `json:"plot_options,omitempty"`
+	Drawings    DrawingOutput                `json:"drawings,omitempty"`
 }
 
 type IndicatorUpdate struct {
@@ -110,6 +160,24 @@ var (
 		"force_overlay",
 		"linestyle",
 	}
+
+	chartPointFromIndexParamNames = []string{"index", "price"}
+	polylineNewParamNames         = []string{"points", "curved", "closed", "xloc", "line_color", "fill_color", "line_style", "line_width", "force_overlay"}
+	boxNewParamNames              = []string{"left", "top", "right", "bottom", "border_color", "border_width", "border_style", "extend", "xloc", "bgcolor", "text", "text_size", "text_color", "text_halign", "text_valign", "text_wrap", "force_overlay"}
+	labelNewParamNames            = []string{"x", "y", "text", "xloc", "yloc", "color", "style", "textcolor", "size", "textalign", "tooltip", "force_overlay"}
+	tableNewParamNames            = []string{"position", "columns", "rows", "bgcolor", "frame_color", "frame_width", "border_color", "border_width", "force_overlay"}
+	tableCellParamNames           = []string{"table_id", "column", "row", "text", "width", "height", "text_color", "text_halign", "text_valign", "text_size", "bgcolor", "tooltip", "text_font_family"}
+	tableClearParamNames          = []string{"table_id", "start_column", "start_row", "end_column", "end_row"}
+	tableMergeCellsParamNames     = []string{"table_id", "start_column", "start_row", "end_column", "end_row"}
+)
+
+const (
+	maxDrawingPolylines     = 160
+	maxDrawingBoxes         = 160
+	maxDrawingLabels        = 120
+	maxDrawingPointsPerLine = 1200
+	maxDrawingTableCells    = 120
+	maxDashboardTextLength  = 96
 )
 
 func seedHistory(n int) []Bar {
@@ -394,19 +462,412 @@ func plotOptionsFromArgs(args []interface{}) PlotRenderOptions {
 	return options
 }
 
+type drawingCollector struct {
+	nextTableID int
+	bars        []Bar
+	polylines   []DrawingPolyline
+	boxes       []DrawingBox
+	labels      []DrawingLabel
+	tables      map[string]tableState
+	tableCells  []tableCell
+	mu          sync.Mutex
+}
+
+type tableState struct {
+	ID       string
+	Position string
+}
+
+type tableCell struct {
+	TableID  string
+	Column   int
+	Row      int
+	Text     string
+	Color    string
+	TextSize string
+}
+
+func newDrawingCollector(bs []Bar) *drawingCollector {
+	return &drawingCollector{bars: bs, tables: map[string]tableState{}}
+}
+
+func (c *drawingCollector) register(engine *pine.Engine) error {
+	registrations := []struct {
+		name   string
+		params []string
+		fn     pine.UserFunction
+	}{
+		{"chart.point.from_index", chartPointFromIndexParamNames, c.chartPointFromIndex},
+		{"polyline.new", polylineNewParamNames, c.polylineNew},
+		{"polyline.delete", []string{"id"}, noopDrawingHook},
+		{"box.new", boxNewParamNames, c.boxNew},
+		{"box.delete", []string{"id"}, noopDrawingHook},
+		{"label.new", labelNewParamNames, c.labelNew},
+		{"label.delete", []string{"id"}, noopDrawingHook},
+		{"table.new", tableNewParamNames, c.tableNew},
+		{"table.cell", tableCellParamNames, c.tableCell},
+		{"table.clear", tableClearParamNames, c.tableClear},
+		{"table.merge_cells", tableMergeCellsParamNames, noopDrawingHook},
+	}
+	for _, reg := range registrations {
+		if err := engine.RegisterFunctionWithParamNames(reg.name, reg.params, reg.fn); err != nil {
+			return fmt.Errorf("register %s function: %w", reg.name, err)
+		}
+	}
+	return nil
+}
+
+func noopDrawingHook(args ...interface{}) (interface{}, error) { return nil, nil }
+
+func (c *drawingCollector) chartPointFromIndex(args ...interface{}) (interface{}, error) {
+	if len(args) < 2 {
+		return nil, errors.New("chart.point.from_index expects index and price")
+	}
+	idx, ok := toFloat64(args[0])
+	if !ok {
+		return nil, nil
+	}
+	price, ok := toFloat64(args[1])
+	if !ok || math.IsNaN(price) || math.IsInf(price, 0) {
+		return nil, nil
+	}
+	return map[string]interface{}{"type": "chart.point", "index": idx, "price": price, "time": c.timeForIndex(int(math.Round(idx)))}, nil
+}
+
+func (c *drawingCollector) polylineNew(args ...interface{}) (interface{}, error) {
+	points := drawingPointsFromValue(firstArg(args, 0))
+	if len(points) > maxDrawingPointsPerLine {
+		points = points[:maxDrawingPointsPerLine]
+	}
+	color := colorString(firstArg(args, 4))
+	if color == "" {
+		color = "rgba(91, 156, 246, 0.55)"
+	}
+	lineWidth := 1
+	if width, ok := toInt(firstArg(args, 7)); ok && width > 0 {
+		lineWidth = width
+	}
+	polyline := DrawingPolyline{Points: points, Color: color, LineWidth: lineWidth, Opacity: 0.85}
+	c.mu.Lock()
+	if len(c.polylines) < maxDrawingPolylines {
+		c.polylines = append(c.polylines, polyline)
+	}
+	c.mu.Unlock()
+	return map[string]interface{}{"type": "polyline", "points": firstArg(args, 0)}, nil
+}
+
+func (c *drawingCollector) boxNew(args ...interface{}) (interface{}, error) {
+	left, lok := toFloat64(firstArg(args, 0))
+	top, tok := toFloat64(firstArg(args, 1))
+	right, rok := toFloat64(firstArg(args, 2))
+	bottom, bok := toFloat64(firstArg(args, 3))
+	if !lok || !tok || !rok || !bok || math.IsNaN(top) || math.IsNaN(bottom) {
+		return map[string]interface{}{"type": "box"}, nil
+	}
+	fill := colorString(firstArg(args, 9))
+	if fill == "" {
+		fill = colorString(firstArg(args, 4))
+	}
+	if fill == "" {
+		fill = "rgba(91, 156, 246, 0.25)"
+	}
+	border := colorString(firstArg(args, 4))
+	if border == "" {
+		border = fill
+	}
+	box := DrawingBox{Left: c.timeForIndex(int(math.Round(left))), Right: c.timeForIndex(int(math.Round(right))), Top: top, Bottom: bottom, Color: fill, BorderColor: border, Opacity: 0.5}
+	c.mu.Lock()
+	if len(c.boxes) < maxDrawingBoxes {
+		c.boxes = append(c.boxes, box)
+	}
+	c.mu.Unlock()
+	return map[string]interface{}{"type": "box", "left": left, "top": top, "right": right, "bottom": bottom}, nil
+}
+
+func (c *drawingCollector) labelNew(args ...interface{}) (interface{}, error) {
+	x, xok := toFloat64(firstArg(args, 0))
+	y, yok := toFloat64(firstArg(args, 1))
+	if !xok || !yok || math.IsNaN(y) || math.IsInf(y, 0) {
+		return map[string]interface{}{"type": "label"}, nil
+	}
+	color := colorString(firstArg(args, 5))
+	if color == "" {
+		color = colorString(firstArg(args, 7))
+	}
+	if color == "" {
+		color = "#ffffff"
+	}
+	size := 6
+	if rawSize, ok := toInt(firstArg(args, 8)); ok {
+		size = 5 + rawSize*2
+	}
+	label := DrawingLabel{Time: c.timeForIndex(int(math.Round(x))), Value: y, Color: color, Size: size}
+	c.mu.Lock()
+	if len(c.labels) < maxDrawingLabels {
+		c.labels = append(c.labels, label)
+	}
+	c.mu.Unlock()
+	return map[string]interface{}{"type": "label", "x": x, "y": y}, nil
+}
+
+func (c *drawingCollector) tableNew(args ...interface{}) (interface{}, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nextTableID++
+	id := fmt.Sprintf("table-%d", c.nextTableID)
+	c.tables[id] = tableState{ID: id, Position: tablePositionString(firstArg(args, 0))}
+	return map[string]interface{}{"type": "table", "id": id, "position": c.tables[id].Position}, nil
+}
+
+func (c *drawingCollector) tableCell(args ...interface{}) (interface{}, error) {
+	column, cok := toInt(firstArg(args, 1))
+	row, rok := toInt(firstArg(args, 2))
+	if !cok || !rok {
+		return nil, nil
+	}
+	cell := tableCell{TableID: tableIDFromValue(firstArg(args, 0)), Column: column, Row: row, Text: truncateText(toOptionalString(firstArg(args, 3)), maxDashboardTextLength), Color: colorString(firstArg(args, 6)), TextSize: tableSizeString(firstArg(args, 9))}
+	c.mu.Lock()
+	if len(c.tableCells) < maxDrawingTableCells {
+		c.tableCells = append(c.tableCells, cell)
+	}
+	c.mu.Unlock()
+	return nil, nil
+}
+
+func (c *drawingCollector) tableClear(args ...interface{}) (interface{}, error) {
+	tableID := tableIDFromValue(firstArg(args, 0))
+	startColumn, hasStartColumn := toInt(firstArg(args, 1))
+	startRow, hasStartRow := toInt(firstArg(args, 2))
+	endColumn, hasEndColumn := toInt(firstArg(args, 3))
+	endRow, hasEndRow := toInt(firstArg(args, 4))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	kept := c.tableCells[:0]
+	for _, cell := range c.tableCells {
+		if tableID != "" && cell.TableID != tableID {
+			kept = append(kept, cell)
+			continue
+		}
+		inColumn := !hasStartColumn || cell.Column >= startColumn
+		inRow := !hasStartRow || cell.Row >= startRow
+		if hasEndColumn {
+			inColumn = inColumn && cell.Column <= endColumn
+		}
+		if hasEndRow {
+			inRow = inRow && cell.Row <= endRow
+		}
+		if !(inColumn && inRow) {
+			kept = append(kept, cell)
+		}
+	}
+	c.tableCells = kept
+	return nil, nil
+}
+
+func (c *drawingCollector) snapshot() DrawingOutput {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	out := DrawingOutput{
+		Polylines: append([]DrawingPolyline(nil), c.polylines...),
+		Boxes:     append([]DrawingBox(nil), c.boxes...),
+		Labels:    append([]DrawingLabel(nil), c.labels...),
+	}
+	if dashboard := dashboardFromTableCells(c.tables, c.tableCells); dashboard != nil {
+		out.Dashboard = dashboard
+	}
+	return out
+}
+
+func (c *drawingCollector) timeForIndex(index int) int64 {
+	if len(c.bars) == 0 {
+		return int64(index * 60)
+	}
+	if index >= 0 && index < len(c.bars) {
+		return c.bars[index].Time
+	}
+	return c.bars[0].Time + int64(index)*60
+}
+
+func drawingPointsFromValue(v interface{}) []DrawingPoint {
+	items := arrayItems(v)
+	points := make([]DrawingPoint, 0, len(items))
+	for _, item := range items {
+		pointMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		t, tok := toFloat64(pointMap["time"])
+		price, pok := toFloat64(pointMap["price"])
+		if !tok || !pok || math.IsNaN(price) || math.IsInf(price, 0) {
+			continue
+		}
+		points = append(points, DrawingPoint{Time: int64(math.Round(t)), Value: price})
+	}
+	return points
+}
+
+func arrayItems(v interface{}) []interface{} {
+	switch arr := v.(type) {
+	case nil:
+		return nil
+	case []interface{}:
+		return arr
+	case pine.ArrayValue:
+		return arr.PineArrayItems()
+	default:
+		return nil
+	}
+}
+
+func dashboardFromTableCells(tables map[string]tableState, cells []tableCell) *DrawingDashboard {
+	if len(cells) == 0 {
+		return nil
+	}
+	sorted := append([]tableCell(nil), cells...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].TableID != sorted[j].TableID {
+			return sorted[i].TableID < sorted[j].TableID
+		}
+		if sorted[i].Row == sorted[j].Row {
+			return sorted[i].Column < sorted[j].Column
+		}
+		return sorted[i].Row < sorted[j].Row
+	})
+	selectedTableID := sorted[0].TableID
+	filtered := sorted[:0]
+	for _, cell := range sorted {
+		if cell.TableID == selectedTableID {
+			filtered = append(filtered, cell)
+		}
+	}
+	rowsByIndex := map[int]map[int]tableCell{}
+	rowIndexes := make([]int, 0)
+	dashboardSize := "normal"
+	for _, cell := range filtered {
+		if cell.Text == "" {
+			continue
+		}
+		if cell.TextSize != "" && dashboardSize == "normal" {
+			dashboardSize = cell.TextSize
+		}
+		if _, ok := rowsByIndex[cell.Row]; !ok {
+			rowsByIndex[cell.Row] = map[int]tableCell{}
+			rowIndexes = append(rowIndexes, cell.Row)
+		}
+		rowsByIndex[cell.Row][cell.Column] = cell
+	}
+	if len(rowIndexes) == 0 {
+		return nil
+	}
+	dashboard := &DrawingDashboard{Position: tablePositionString(nil), Size: dashboardSize}
+	if table, ok := tables[selectedTableID]; ok && table.Position != "" {
+		dashboard.Position = table.Position
+	}
+	for _, rowIdx := range rowIndexes {
+		row := rowsByIndex[rowIdx]
+		left := row[0]
+		right := row[1]
+		if dashboard.Title == "" && right.Text == "" {
+			dashboard.Title = left.Text
+			continue
+		}
+		if left.Text == "" && right.Text == "" {
+			continue
+		}
+		dashboard.Rows = append(dashboard.Rows, DashboardRow{Label: left.Text, Value: right.Text, Color: right.Color})
+	}
+	if dashboard.Title == "" {
+		dashboard.Title = "Indicator Table"
+	}
+	if len(dashboard.Rows) == 0 && dashboard.Title == "" {
+		return nil
+	}
+	return dashboard
+}
+
+func tableIDFromValue(v interface{}) string {
+	if tableMap, ok := v.(map[string]interface{}); ok {
+		if id, ok := tableMap["id"].(string); ok {
+			return id
+		}
+	}
+	return ""
+}
+
+func tablePositionString(v interface{}) string {
+	position, ok := toInt(v)
+	if !ok {
+		return "top_right"
+	}
+	switch position {
+	case 1:
+		return "bottom_right"
+	case 2:
+		return "top_left"
+	case 3:
+		return "bottom_left"
+	default:
+		return "top_right"
+	}
+}
+
+func tableSizeString(v interface{}) string {
+	size, ok := toInt(v)
+	if !ok {
+		return ""
+	}
+	switch size {
+	case 0:
+		return "tiny"
+	case 1:
+		return "small"
+	case 3:
+		return "large"
+	case 4:
+		return "huge"
+	case 5:
+		return "auto"
+	default:
+		return "normal"
+	}
+}
+
+func truncateText(value string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= maxLen {
+		return value
+	}
+	return string(runes[:maxLen-1]) + "…"
+}
+
+func firstArg(args []interface{}, index int) interface{} {
+	if index < 0 || index >= len(args) {
+		return nil
+	}
+	return args[index]
+}
+
 func normalizeScript(script string) (string, error) {
 	lines := strings.Split(script, "\n")
 	cleaned := make([]string, 0, len(lines))
 
 	for _, rawLine := range lines {
-		line := strings.TrimSpace(rawLine)
-		if line == "" || strings.HasPrefix(line, "//") {
+		line := strings.TrimRight(rawLine, " \t\r")
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine == "" || strings.HasPrefix(trimmedLine, "//") {
 			continue
 		}
 		// split line by ; into lines and trim each part, ignoring empty parts
 		parts := strings.Split(line, ";")
 		for _, part := range parts {
-			trimmed := strings.TrimSpace(part)
+			trimmed := strings.TrimRight(part, " \t\r")
+			if len(parts) > 1 {
+				trimmed = strings.TrimSpace(trimmed)
+			}
 			if trimmed != "" {
 				cleaned = append(cleaned, trimmed)
 			}
@@ -925,21 +1386,22 @@ func ensureRequiredValueTypes(provider *barProvider, required []string) error {
 }
 
 func evalScript(script string, bs []Bar) (map[string][]PlotPoint, error) {
-	plots, _, err := evalScriptWithOptions(script, bs)
+	plots, _, _, err := evalScriptWithOptions(script, bs)
 	return plots, err
 }
 
-func evalScriptWithOptions(script string, bs []Bar) (map[string][]PlotPoint, map[string]PlotRenderOptions, error) {
+func evalScriptWithOptions(script string, bs []Bar) (map[string][]PlotPoint, map[string]PlotRenderOptions, DrawingOutput, error) {
 	normalized, err := normalizeScript(script)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, DrawingOutput{}, err
 	}
 
 	provider := newBarProvider("DEMO", bs)
 	if err := ensureRequiredValueTypes(provider, requiredOHLCVValueTypes); err != nil {
-		return nil, nil, err
+		return nil, nil, DrawingOutput{}, err
 	}
 	collector := newPlotCollector(bs)
+	drawings := newDrawingCollector(bs)
 
 	engine := pine.NewEngine()
 	engine.RegisterMarketDataProvider(provider)
@@ -953,17 +1415,20 @@ func evalScriptWithOptions(script string, bs []Bar) (map[string][]PlotPoint, map
 	}
 
 	if err := engine.RegisterFunctionWithParamNames("plot", plotParamNames, collector.capture); err != nil {
-		return nil, nil, fmt.Errorf("register plot function: %w", err)
+		return nil, nil, DrawingOutput{}, fmt.Errorf("register plot function: %w", err)
+	}
+	if err := drawings.register(engine); err != nil {
+		return nil, nil, DrawingOutput{}, err
 	}
 
 	bytecode, err := engine.Compile(normalized)
 	if err != nil {
-		return nil, nil, fmt.Errorf("compile failed: %w", err)
+		return nil, nil, DrawingOutput{}, fmt.Errorf("compile failed: %w", err)
 	}
 
 	v, err := engine.Execute(bytecode)
 	if err != nil {
-		return nil, nil, fmt.Errorf("execute failed: %w", err)
+		return nil, nil, DrawingOutput{}, fmt.Errorf("execute failed: %w", err)
 	}
 
 	plots := collector.snapshot()
@@ -974,11 +1439,11 @@ func evalScriptWithOptions(script string, bs []Bar) (map[string][]PlotPoint, map
 		}
 	}
 
-	return plots, plotOptions, nil
+	return plots, plotOptions, drawings.snapshot(), nil
 }
 
 func evalIndicatorOutput(ind *IndicatorScript, bs []Bar) (*IndicatorOutput, error) {
-	plots, plotOptions, err := evalScriptWithOptions(ind.Script, bs)
+	plots, plotOptions, drawings, err := evalScriptWithOptions(ind.Script, bs)
 	if err != nil {
 		return nil, err
 	}
@@ -988,6 +1453,7 @@ func evalIndicatorOutput(ind *IndicatorScript, bs []Bar) (*IndicatorOutput, erro
 		Overlay:     indicatorOverlay(ind.Script),
 		Plots:       plots,
 		PlotOptions: plotOptions,
+		Drawings:    drawings,
 	}, nil
 }
 
@@ -1170,7 +1636,7 @@ func tickLoop() {
 	for range ticker.C {
 		barsMu.Lock()
 		if len(bars) == 0 {
-			bars = seedHistory(300)
+			bars = seedHistory(1200)
 		}
 		next := nextBar(bars[len(bars)-1])
 		bars = append(bars, next)
@@ -1195,7 +1661,7 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 
 	barsMu.Lock()
-	bars = seedHistory(300)
+	bars = seedHistory(1200)
 	barsMu.Unlock()
 
 	go tickLoop()

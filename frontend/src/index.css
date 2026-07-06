@@ -142,6 +142,7 @@ html, body, #root {
   min-height: 0;
   background: var(--bg);
   overflow: hidden;
+  position: relative;
 }
 
 .chart-pane-price {
@@ -155,6 +156,26 @@ html, body, #root {
 
 .chart-pane-hidden {
   display: none;
+}
+
+.drawing-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.drawing-overlay-back {
+  z-index: 1;
+}
+
+.chart-pane-price > div:not(.chart-legend) {
+  position: relative;
+  z-index: 2;
+}
+
+.drawing-overlay-front {
+  z-index: 3;
 }
 
 /* floating legend */

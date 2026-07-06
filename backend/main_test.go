@@ -2,6 +2,8 @@ package main
 
 import (
 	"math"
+	"os"
+	"strings"
 	"testing"
 
 	pine "github.com/woodstock-tokyo/pinescription"
@@ -17,6 +19,72 @@ func testBars() []Bar {
 
 func almostEqual(a, b float64) bool {
 	return math.Abs(a-b) < 1e-9
+}
+
+func TestEvalExample2EmitsDrawingOutput(t *testing.T) {
+	script, err := os.ReadFile("../example2.pine")
+	if err != nil {
+		t.Fatalf("read example2.pine: %v", err)
+	}
+
+	mutatedTitleScript := strings.Replace(string(script), "Volumetric Regression Heatmap [LuxAlgo]", "Runtime Drawing Hook Smoke", 1)
+	output, err := evalIndicatorOutput(&IndicatorScript{
+		ID:     "example2",
+		Name:   "Runtime Drawing Hook Smoke",
+		Script: mutatedTitleScript,
+	}, seedHistory(1200))
+	if err != nil {
+		t.Fatalf("evalIndicatorOutput failed: %v", err)
+	}
+	if !output.Overlay {
+		t.Fatalf("overlay = false, want true")
+	}
+	if len(output.Drawings.Polylines) == 0 {
+		t.Fatalf("expected example2 to emit heatmap polylines")
+	}
+	if len(output.Drawings.Boxes) == 0 {
+		t.Fatalf("expected example2 to emit volume profile boxes")
+	}
+	if output.Drawings.Dashboard == nil {
+		t.Fatalf("expected example2 to emit dashboard table")
+	}
+	if output.Drawings.Dashboard.Position != "top_right" {
+		t.Fatalf("dashboard position = %q, want top_right", output.Drawings.Dashboard.Position)
+	}
+	if output.Drawings.Dashboard.Size != "small" {
+		t.Fatalf("dashboard size = %q, want small", output.Drawings.Dashboard.Size)
+	}
+}
+
+func TestEvalScriptCollectsTablePositionSizeAndClear(t *testing.T) {
+	script := `indicator("Table Clear", overlay=true)
+t = table.new(position.bottom_left, 2, 2)
+table.cell(t, 0, 0, "keep", text_size=size.large)
+table.cell(t, 1, 1, "drop")
+t.clear(1, 1, 1, 1)
+1`
+
+	output, err := evalIndicatorOutput(&IndicatorScript{ID: "table", Name: "Table Clear", Script: script}, testBars())
+	if err != nil {
+		t.Fatalf("evalIndicatorOutput failed: %v", err)
+	}
+	if output.Drawings.Dashboard == nil {
+		t.Fatalf("expected dashboard output")
+	}
+	if output.Drawings.Dashboard.Position != "bottom_left" {
+		t.Fatalf("dashboard position = %q, want bottom_left", output.Drawings.Dashboard.Position)
+	}
+	if output.Drawings.Dashboard.Size != "large" {
+		t.Fatalf("dashboard size = %q, want large", output.Drawings.Dashboard.Size)
+	}
+	if output.Drawings.Dashboard.Title != "keep" {
+		t.Fatalf("dashboard title = %q, want keep", output.Drawings.Dashboard.Title)
+	}
+	for _, row := range output.Drawings.Dashboard.Rows {
+		if row.Label == "drop" || row.Value == "drop" {
+			t.Fatalf("table.clear did not remove cleared cell: %+v", output.Drawings.Dashboard.Rows)
+		}
+	}
 }
 
 func TestEvalScriptSupportsParenthesizedSourceExpression(t *testing.T) {

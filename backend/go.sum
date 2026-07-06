@@ -1,10 +1,6 @@
 github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
-github.com/woodstock-tokyo/pinescription v0.0.0-20260505162828-3f75c7e67bdf h1:zgZnxluHjOdNc/7PO+pTuPLsOnu7BQXgp+QCrU8X8cg=
-github.com/woodstock-tokyo/pinescription v0.0.0-20260505162828-3f75c7e67bdf/go.mod h1:+kS3NoS7wYiqku5C0Nc7kqh+r86s/Tll2Igxr3pbCx0=
-github.com/woodstock-tokyo/pinescription v0.0.0-20260505181927-45f4c47ea771 h1:Xr7aXXlc3fx/3FIMb7tcCuRASRKb+S1obaPNWGaQQc8=
-github.com/woodstock-tokyo/pinescription v0.0.0-20260505181927-45f4c47ea771/go.mod h1:+kS3NoS7wYiqku5C0Nc7kqh+r86s/Tll2Igxr3pbCx0=
-github.com/woodstock-tokyo/pinescription v0.0.0-20260508100511-a9cd1fc48904 h1:fnGSjHLa3jBIznvaXbXABmLPYcMPg2YQVxBkShvDH2s=
-github.com/woodstock-tokyo/pinescription v0.0.0-20260508100511-a9cd1fc48904/go.mod h1:+kS3NoS7wYiqku5C0Nc7kqh+r86s/Tll2Igxr3pbCx0=
+github.com/woodstock-tokyo/pinescription v0.0.0-20260706073641-8befce27eba3 h1:pBvvnNi9psGlBKviuTYJcsZ60XeyhrJ35NXSEw/plyw=
+github.com/woodstock-tokyo/pinescription v0.0.0-20260706073641-8befce27eba3/go.mod h1:+kS3NoS7wYiqku5C0Nc7kqh+r86s/Tll2Igxr3pbCx0=
 gonum.org/v1/gonum v0.17.0 h1:VbpOemQlsSMrYmn7T2OUvQ4dqxQXU+ouZFQsZOx50z4=
 gonum.org/v1/gonum v0.17.0/go.mod h1:El3tOrEuMpv2UdMrbNlKEh9vd86bmQ6vqIcDwxEOc1E=

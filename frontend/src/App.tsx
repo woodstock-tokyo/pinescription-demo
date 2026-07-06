@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { WSClient } from './ws'
 import type { Bar, IndicatorPane, IndicatorScript } from './types'
 import { PRESETS } from './presets'
-import { useChart, getColourMap } from './useChart'
+import { useChart, getColourMap, hasIndicatorColours } from './useChart'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -28,10 +28,10 @@ export default function App() {
   const [activeInds,  setActiveInds]  = useState<IndicatorScript[]>([])
   const [lastBar,     setLastBar]     = useState<Bar | null>(null)
   const [prevClose,   setPrevClose]   = useState<number | null>(null)
-  const [formId,      setFormId]      = useState('')
-  const [formName,    setFormName]    = useState('')
+  const [formId,      setFormId]      = useState(PRESETS[0].id)
+  const [formName,    setFormName]    = useState(PRESETS[0].name)
   const [formScript,  setFormScript]  = useState(PRESETS[0].script)
-  const [sourcePresetId, setSourcePresetId] = useState('')
+  const [sourcePresetId, setSourcePresetId] = useState(PRESETS[0].id)
   const [formError,   setFormError]   = useState('')
   const [hiddenInds,  setHiddenInds]  = useState<Record<string, boolean>>({})
   const [, forceRender] = useState(0)
@@ -67,7 +67,7 @@ export default function App() {
         case 'indicator_loaded': {
           const o = msg.indicator_output
           const detectedPane: IndicatorPane = o.overlay ? 'price' : 'separate'
-          chart.loadIndicator(o.indicator_id, o.plots, indicatorPaneRef.current[o.indicator_id] ?? detectedPane, o.plot_options)
+          chart.loadIndicator(o.indicator_id, o.plots, indicatorPaneRef.current[o.indicator_id] ?? detectedPane, o.plot_options, o.drawings)
           setActiveInds(prev => {
             const filtered = prev.filter(i => i.id !== o.indicator_id)
             return [...filtered, { id: o.indicator_id, name: o.name, script: '' }]
@@ -252,8 +252,8 @@ export default function App() {
               )
               : activeInds.map(ind => {
                   const indColours = colours[ind.id] || {}
-                  const firstColour = Object.values(indColours)[0] ?? '#fff'
-                  return (
+                   const firstColour = Object.values(indColours)[0] ?? '#ff9800'
+                   return (
                     <div key={ind.id} className="ind-card">
                       <div className="ind-card-head">
                         <div className="ind-swatch" style={{ background: firstColour }} />
@@ -261,6 +261,16 @@ export default function App() {
                         <button className="ind-remove" onClick={() => removeIndicator(ind.id)} title="Remove">✕</button>
                       </div>
                       <div className="ind-plots">
+                        {!hasIndicatorColours(ind.id) && (
+                          <button
+                            type="button"
+                            className={`plot-pill ${hiddenInds[ind.id] ? 'hidden' : ''}`}
+                            onClick={() => toggleIndicatorVisible(ind.id)}
+                            title={`${hiddenInds[ind.id] ? 'Show' : 'Hide'} ${ind.name}`}
+                          >
+                            Drawings
+                          </button>
+                        )}
                         {Object.entries(indColours).map(([plotName, colour]) => (
                           <button
                             key={plotName}

@@ -25,12 +25,62 @@ export interface PlotRenderOptions {
   force_overlay?: boolean
 }
 
+export interface DrawingPoint {
+  time:  number
+  value: number
+}
+
+export interface DrawingPolyline {
+  points:     DrawingPoint[]
+  color:      string
+  line_width: number
+  opacity?:   number
+}
+
+export interface DrawingBox {
+  left:          number
+  right:         number
+  top:           number
+  bottom:        number
+  color:         string
+  border_color?: string
+  opacity?:      number
+}
+
+export interface DrawingLabel {
+  time:  number
+  value: number
+  color: string
+  size?: number
+}
+
+export interface DashboardRow {
+  label: string
+  value: string
+  color?: string
+}
+
+export interface DrawingDashboard {
+  title:     string
+  rows:      DashboardRow[]
+  position?: string
+  size?:     string
+}
+
+export interface DrawingOutput {
+  polylines?: DrawingPolyline[]
+  boxes?:     DrawingBox[]
+  labels?:    DrawingLabel[]
+  dashboard?: DrawingDashboard
+}
+
 export interface IndicatorOutput {
   indicator_id: string
   name:         string
   overlay:      boolean
   plots:        Record<string, PlotPoint[]>  // plot-name → series
   plot_options?: Record<string, PlotRenderOptions>
+  drawings?:     DrawingOutput
 }
 
 export interface IndicatorUpdate {
