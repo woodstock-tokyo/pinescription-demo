@@ -29,9 +29,10 @@ type Bar struct {
 }
 
 type IndicatorScript struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Script string `json:"script"`
+	ID     string                 `json:"id"`
+	Name   string                 `json:"name"`
+	Script string                 `json:"script"`
+	Inputs map[string]interface{} `json:"inputs,omitempty"`
 }
 
 type PlotPoint struct {
@@ -124,6 +125,8 @@ type WSEnvelope struct {
 	IndicatorUpdates []IndicatorUpdate `json:"indicator_updates,omitempty"`
 	ID               string            `json:"id,omitempty"`
 	Error            string            `json:"error,omitempty"`
+	RequestID        string            `json:"request_id,omitempty"`
+	InputParameters  []ScriptInput     `json:"input_parameters,omitempty"`
 }
 
 var (
@@ -861,14 +864,12 @@ func normalizeScript(script string) (string, error) {
 		if trimmedLine == "" || strings.HasPrefix(trimmedLine, "//") {
 			continue
 		}
-		// split line by ; into lines and trim each part, ignoring empty parts
-		parts := strings.Split(line, ";")
+		// A text/tooltip default may contain semicolons. Only split actual
+		// statements, preserving block indentation and quoted text.
+		parts := splitScriptLine(line)
 		for _, part := range parts {
 			trimmed := strings.TrimRight(part, " \t\r")
-			if len(parts) > 1 {
-				trimmed = strings.TrimSpace(trimmed)
-			}
-			if trimmed != "" {
+			if strings.TrimSpace(trimmed) != "" {
 				cleaned = append(cleaned, trimmed)
 			}
 		}
@@ -881,10 +882,49 @@ func normalizeScript(script string) (string, error) {
 	return strings.Join(cleaned, "\n"), nil
 }
 
+func splitScriptLine(line string) []string {
+	indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+	start, quote, escaped := 0, byte(0), false
+	var parts []string
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if quote != 0 {
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '\'' || ch == '"' {
+			quote = ch
+		} else if ch == '/' && i+1 < len(line) && line[i+1] == '/' {
+			break
+		} else if ch == ';' {
+			part := line[start:i]
+			if start > 0 {
+				part = indent + strings.TrimSpace(part)
+			}
+			parts = append(parts, part)
+			start = i + 1
+		}
+	}
+	part := line[start:]
+	if start > 0 {
+		part = indent + strings.TrimSpace(part)
+	}
+	return append(parts, part)
+}
+
 func indicatorOverlay(script string) bool {
 	const pineDefaultOverlay = false
 
 	call, ok, err := leadingCallText(script, "indicator")
+	if !ok && err == nil {
+		call, ok, err = leadingCallText(script, "strategy")
+	}
 	if err != nil || !ok {
 		return pineDefaultOverlay
 	}
@@ -1391,7 +1431,11 @@ func evalScript(script string, bs []Bar) (map[string][]PlotPoint, error) {
 }
 
 func evalScriptWithOptions(script string, bs []Bar) (map[string][]PlotPoint, map[string]PlotRenderOptions, DrawingOutput, error) {
-	normalized, err := normalizeScript(script)
+	return evalScriptWithInputs(script, bs, nil)
+}
+
+func evalScriptWithInputs(script string, bs []Bar, inputs map[string]interface{}) (map[string][]PlotPoint, map[string]PlotRenderOptions, DrawingOutput, error) {
+	engine, bytecode, _, err := compileIndicator(script)
 	if err != nil {
 		return nil, nil, DrawingOutput{}, err
 	}
@@ -1403,7 +1447,7 @@ func evalScriptWithOptions(script string, bs []Bar) (map[string][]PlotPoint, map
 	collector := newPlotCollector(bs)
 	drawings := newDrawingCollector(bs)
 
-	engine := pine.NewEngine()
+	engine.SetInputParameters(inputs)
 	engine.RegisterMarketDataProvider(provider)
 	engine.SetDefaultSymbol(provider.symbol)
 	engine.SetDefaultValueType("close")
@@ -1421,11 +1465,7 @@ func evalScriptWithOptions(script string, bs []Bar) (map[string][]PlotPoint, map
 		return nil, nil, DrawingOutput{}, err
 	}
 
-	bytecode, err := engine.Compile(normalized)
-	if err != nil {
-		return nil, nil, DrawingOutput{}, fmt.Errorf("compile failed: %w", err)
-	}
-
+	defer engine.ClearRuntime()
 	v, err := engine.Execute(bytecode)
 	if err != nil {
 		return nil, nil, DrawingOutput{}, fmt.Errorf("execute failed: %w", err)
@@ -1443,7 +1483,7 @@ func evalScriptWithOptions(script string, bs []Bar) (map[string][]PlotPoint, map
 }
 
 func evalIndicatorOutput(ind *IndicatorScript, bs []Bar) (*IndicatorOutput, error) {
-	plots, plotOptions, drawings, err := evalScriptWithOptions(ind.Script, bs)
+	plots, plotOptions, drawings, err := evalScriptWithInputs(ind.Script, bs, ind.Inputs)
 	if err != nil {
 		return nil, err
 	}
@@ -1475,6 +1515,7 @@ func indicatorsSnapshot() []*IndicatorScript {
 			continue
 		}
 		cp := *ind
+		cp.Inputs = cloneInputValues(ind.Inputs)
 		out = append(out, &cp)
 	}
 
@@ -1487,14 +1528,14 @@ func latestIndicatorValues(bs []Bar) []IndicatorUpdate {
 	updates := make([]IndicatorUpdate, 0, len(inds))
 
 	for _, ind := range inds {
-		plots, err := evalScript(ind.Script, bs)
+		output, err := evalIndicatorOutput(ind, bs)
 		if err != nil {
 			log.Printf("eval error %s: %v", ind.ID, err)
 			continue
 		}
 
 		vals := make(map[string]float64)
-		for name, pts := range plots {
+		for name, pts := range output.Plots {
 			if len(pts) == 0 {
 				continue
 			}
@@ -1572,6 +1613,17 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch req.Type {
+		case "inspect_inputs":
+			if req.Indicator == nil {
+				_ = conn.WriteJSON(WSEnvelope{Type: "error", RequestID: req.RequestID, Error: "missing indicator payload"})
+				continue
+			}
+			_, _, inputs, err := compileIndicator(req.Indicator.Script)
+			if err != nil {
+				_ = conn.WriteJSON(WSEnvelope{Type: "error", RequestID: req.RequestID, Error: err.Error()})
+				continue
+			}
+			_ = conn.WriteJSON(WSEnvelope{Type: "inputs_discovered", RequestID: req.RequestID, InputParameters: inputs})
 		case "add_indicator":
 			if req.Indicator == nil {
 				writeError(conn, "missing indicator payload")
@@ -1582,6 +1634,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				ID:     strings.TrimSpace(req.Indicator.ID),
 				Name:   strings.TrimSpace(req.Indicator.Name),
 				Script: req.Indicator.Script,
+				Inputs: cloneInputValues(req.Indicator.Inputs),
 			}
 			if ind.ID == "" {
 				writeError(conn, "indicator.id is required")
@@ -1595,18 +1648,15 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				ind.Name = ind.ID
 			}
 
-			indMu.Lock()
-			indicators[ind.ID] = ind
-			indMu.Unlock()
-
 			output, err := evalIndicatorOutput(ind, barsSnapshot())
 			if err != nil {
-				indMu.Lock()
-				delete(indicators, ind.ID)
-				indMu.Unlock()
 				writeError(conn, fmt.Sprintf("eval error: %v", err))
 				continue
 			}
+			// Invalid overrides must not replace an already working indicator.
+			indMu.Lock()
+			indicators[ind.ID] = ind
+			indMu.Unlock()
 
 			_ = conn.WriteJSON(WSEnvelope{Type: "indicator_loaded", IndicatorOutput: output})
 

@@ -8,28 +8,29 @@ indicator("Volumetric Regression Heatmap [LuxAlgo]", "LuxAlgo - Volumetric Regre
 // Constants
 //---------------------------------------------------------------------------------------------------------------------{
 
-var string G_CORE = "Core Settings"
-var string G_HEATMAP = "Heatmap Settings"
-var string G_HEATMAP_COLORS = "Heatmap Colors"
-var string G_SIGNALS = "Mean Reversion Signals"
-var string G_DELTA = "Delta Histograms"
-var string G_STYLE = "Style & Options"
-var string G_DASH = "Dashboard"
+// Demo adaptation: input metadata is resolved before runtime execution.
+const string G_CORE = "Core Settings"
+const string G_HEATMAP = "Heatmap Settings"
+const string G_HEATMAP_COLORS = "Heatmap Colors"
+const string G_SIGNALS = "Mean Reversion Signals"
+const string G_DELTA = "Delta Histograms"
+const string G_STYLE = "Style & Options"
+const string G_DASH = "Dashboard"
 
 color DATA                    = #DBDBDB
 color HEADERS                 = #808080
 color BACKGROUND              = #161616
 color BORDERS                 = #2E2E2E
 
-string TOP_RIGHT               = 'Top Right'
-string BOTTOM_RIGHT            = 'Bottom Right'
-string BOTTOM_LEFT             = 'Bottom Left'
+const string TOP_RIGHT         = 'Top Right'
+const string BOTTOM_RIGHT      = 'Bottom Right'
+const string BOTTOM_LEFT       = 'Bottom Left'
 
-string TINY                    = 'Tiny'
-string SMALL                   = 'Small'
-string NORMAL                  = 'Normal'
-string LARGE                   = 'Large'
-string HUGE                    = 'Huge'
+const string TINY              = 'Tiny'
+const string SMALL             = 'Small'
+const string NORMAL            = 'Normal'
+const string LARGE             = 'Large'
+const string HUGE              = 'Huge'
 
 //---------------------------------------------------------------------------------------------------------------------}
 // Inputs
@@ -42,11 +43,12 @@ dynamicLengthInput = input.bool(true, "Dynamic Auto-Adjusting Period", group = G
 numBinsInput = input.int(40, "Grid Rows Each Side", minval = 5, maxval = 45, group = G_HEATMAP, tooltip = "The number of parallel channel levels plotted above and below the center line.")
 smoothBinsInput = input.int(4, "Gradient Smoothing", minval = 0, maxval = 20, group = G_HEATMAP, tooltip = "Smoothes the volume profile to create a gradual color gradient across the channels.")
 
-color1Input = input.color(color.new(#000000, 100), "Color 1 (Low Volume)", group = G_HEATMAP_COLORS)
-color2Input = input.color(color.new(#5b9cf6, 95), "Color 2", group = G_HEATMAP_COLORS)
-color3Input = input.color(color.new(#089981, 90), "Color 3", group = G_HEATMAP_COLORS)
-color4Input = input.color(color.new(#ff9800, 80), "Color 4", group = G_HEATMAP_COLORS)
-color5Input = input.color(color.new(#f23645, 60), "Color 5 (High Volume)", group = G_HEATMAP_COLORS)
+// Literal RGBA defaults preserve the original color.new transparency values.
+color1Input = input.color(#00000000, "Color 1 (Low Volume)", group = G_HEATMAP_COLORS)
+color2Input = input.color(#5b9cf60d, "Color 2", group = G_HEATMAP_COLORS)
+color3Input = input.color(#0899811a, "Color 3", group = G_HEATMAP_COLORS)
+color4Input = input.color(#ff980033, "Color 4", group = G_HEATMAP_COLORS)
+color5Input = input.color(#f2364566, "Color 5 (High Volume)", group = G_HEATMAP_COLORS)
 
 showSignalsInput = input.bool(true, "Show Mean Reversion Signals", group = G_SIGNALS)
 signalBandInput = input.float(2.0, "Signal Band (SD Multiplier)", group = G_SIGNALS, tooltip = "The standard deviation level price must reach to trigger a reversion signal.")
@@ -55,8 +57,8 @@ slopeThresholdInput = input.float(2.5, "Flat Slope Threshold", step = 0.5, group
 showDeltaInput = input.bool(true, "Show Top/Bottom Delta Histograms", group = G_DELTA)
 deltaScaleInput = input.float(0.6, "Histogram Height Scale", minval=0.1, maxval=2.0, step=0.1, group=G_DELTA, tooltip="Scales the height of the volume delta bars extending from the top and bottom of the channel.")
 deltaWidthInput = input.int(3, "Histogram Bar Width", minval=1, maxval=10, group=G_DELTA)
-buyColorInput = input.color(color.new(#089981, 40), "Buy Volume Color", group = G_DELTA)
-sellColorInput = input.color(color.new(#f23645, 40), "Sell Volume Color", group = G_DELTA)
+buyColorInput = input.color(#08998199, "Buy Volume Color", group = G_DELTA)
+sellColorInput = input.color(#f2364599, "Sell Volume Color", group = G_DELTA)
 
 lineWidthInput = input.int(10, "Heatmap Line Width", minval = 1, maxval = 100, group = G_STYLE, tooltip = "Controls the thickness of the heatmap bands to fill empty spaces.")
 extendLengthInput = input.int(30, "Future Projection Length", minval = 0, maxval = 200, group = G_STYLE, tooltip = "Number of bars to extend the heatmap into the future.")

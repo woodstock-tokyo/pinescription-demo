@@ -1,0 +1,12 @@
+//@version=6
+// Historical recomputation on simulated bars, not live tick/fill recalculation.
+strategy("Historical SMA Strategy", overlay=false, initial_capital=10000, margin_long=0, margin_short=0, slippage=1)
+length = input.int(20, "SMA length", minval=2, maxval=200)
+average = ta.sma(close, length)
+wasLong = nz(strategy.position_size[1], 0) > 0
+if ta.crossover(close, average)
+    strategy.entry("L", strategy.long, qty=0.01)
+if ta.crossunder(close, average) and (strategy.position_size > 0 or wasLong)
+    strategy.close("L")
+plot(strategy.equity, title="Equity", color=#089981)
+plot(strategy.equity[1], title="Previous calculation equity", color=#808080)

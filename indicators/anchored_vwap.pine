@@ -1,0 +1,8 @@
+//@version=6
+indicator("Daily Anchored VWAP", overlay=true)
+deviations = input.float(2, "Band deviations", minval=0, maxval=5, step=0.25)
+anchor = bar_index == 0 or timeframe.change("1D")
+[mean, upper, lower] = ta.vwap(hlc3, anchor, deviations)
+plot(mean, title="VWAP", color=#ff9800)
+plot(upper, title="Upper band", color=#089981)
+plot(lower, title="Lower band", color=#f23645)
