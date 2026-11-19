@@ -1,0 +1,6 @@
+//@version=6
+indicator("Configurable EMA", overlay=true)
+const int defaultLength = 20
+length = input.int(defaultLength, "Length", minval=1, maxval=200)
+source = input.source(close, "Source")
+plot(ta.ema(source, length), title="EMA", color=#5b9cf6)

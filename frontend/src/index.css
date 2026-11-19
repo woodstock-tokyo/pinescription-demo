@@ -356,6 +356,9 @@ html, body, #root {
   transition: border-color .15s;
 }
 .field-input:focus { border-color: var(--accent-hi); }
+.field-hint { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.input-parameters { display: flex; flex-direction: column; gap: 12px; }
+.input-parameters input[type="checkbox"] { align-self: flex-start; accent-color: var(--accent); }
 
 .script-editor {
   background: var(--surface2);

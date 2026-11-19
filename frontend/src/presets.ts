@@ -1,5 +1,9 @@
 import type { IndicatorPane } from './types'
 import volumetricRegressionHeatmapScript from '../../example2.pine?raw'
+import inputsEmaScript from '../../indicators/inputs_ema.pine?raw'
+import anchoredVwapScript from '../../indicators/anchored_vwap.pine?raw'
+import rciScript from '../../indicators/rci.pine?raw'
+import strategyHistoryScript from '../../indicators/strategy_history.pine?raw'
 
 export interface Preset {
   id:          string
@@ -10,6 +14,32 @@ export interface Preset {
 }
 
 export const PRESETS: Preset[] = [
+  {
+    id: 'configurable_ema',
+    name: 'Configurable EMA',
+    description: 'Inspect inputs to choose a source and EMA length before execution',
+    script: inputsEmaScript,
+  },
+  {
+    id: 'anchored_vwap',
+    name: 'Daily Anchored VWAP',
+    description: 'Volume-weighted mean and deviation bands using actual UTC bar dates',
+    script: anchoredVwapScript,
+  },
+  {
+    id: 'rci',
+    name: 'Rank Correlation Index',
+    description: 'Rank correlation with a configurable lookback',
+    pane: 'separate',
+    script: rciScript,
+  },
+  {
+    id: 'strategy_history',
+    name: 'Historical SMA Strategy',
+    description: 'Limited native broker: equity and prior-calculation snapshots, explicit zero margins',
+    pane: 'separate',
+    script: strategyHistoryScript,
+  },
   {
     id: 'volumetric_regression_heatmap',
     name: 'Volumetric Regression Heatmap',

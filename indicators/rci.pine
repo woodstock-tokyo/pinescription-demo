@@ -1,0 +1,4 @@
+//@version=6
+indicator("Rank Correlation Index", overlay=false)
+length = input.int(14, "Length", minval=2, maxval=100)
+plot(ta.rci(close, length), title="RCI", color=#9c27b0)

@@ -11,7 +11,8 @@ This project demonstrates a PineScript-inspired DSL for defining technical indic
 ```
 pinescription-demo/
 ├── backend/          # Go WebSocket server + indicator engine
-│   ├── main.go       # Server, DSL parser, indicator evaluation
+│   ├── main.go       # Server, script normalization, plot/drawing hooks
+│   ├── runtime.go    # Pre-execution input discovery and market context
 │   ├── go.mod
 │   └── Dockerfile
 ├── frontend/         # React + TypeScript + Lightweight Charts
@@ -40,53 +41,102 @@ pinescription-demo/
 - **Preset indicators** — built-in SMA Cross, RSI, MACD, Bollinger Bands, and more
 - **Drawing-object examples** — renders runtime-captured `polyline`, `box`, `label`, and `table` output for scripts such as `example2.pine`
 - **Custom scripts** — write and evaluate your own indicator scripts in the browser
+- **Pre-execution inputs** — discover input metadata, edit typed values, and apply validated overrides without changing source
+- **Market context** — actual bar timestamps, UTC timezone, a continuous `24x7` session, and simulated contract metadata
+- **Updated runtime presets** — configurable EMA, anchored VWAP/bands, RCI, and historical strategy equity with metric snapshots
+
+The backend pins pinescription revision `000ace7` from
+[pinescription PR #15](https://github.com/woodstock-tokyo/pinescription/pull/15).
+That PR is an upstream dependency, not a claim that the API expansion is already
+released on the compiler's main branch. No local module replacement is required.
 
 ## Quick Start
 
 ### Using Docker Compose
 
-Docker Compose is useful for the released-module setup. While `backend/go.mod` contains the local `../../pinescription` replace used by this workspace, prefer the manual development flow below; the backend Docker build context is `./backend` and cannot see the sibling checkout unless the Docker context/build files are adjusted.
+The backend build downloads the pinned module and uses BuildKit SSH forwarding
+for GitHub access. Ensure your SSH agent can access the compiler repository.
+The frontend uses the repository-root build context so its shared `.pine`
+preset imports are available.
 
 ```bash
-docker-compose up --build
+docker compose up --build
 ```
 
 Then open http://localhost:3000
 
 ### Manual
 
-The backend currently uses a local workspace patch of pinescription:
-
-```go
-replace github.com/woodstock-tokyo/pinescription => ../../pinescription
-```
-
-For manual development, keep this repository checked out next to the sibling pinescription repository:
-
-```text
-src/
-├── pinescription/
-└── pinescription-demo/
-```
+Install Go 1.25.6 or newer and Node.js 20 or newer. A sibling compiler checkout is
+optional; the checked-in `go.mod` and `go.sum` resolve the pinned revision.
+If your GitHub setup requires it, configure `GOPRIVATE` and Git credentials before
+downloading `github.com/woodstock-tokyo/pinescription`.
 
 **Backend:**
 ```bash
 cd backend
-go run main.go
+go run .
 # Listens on :8080
 ```
 
 **Frontend:**
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 # Opens on :3000
+```
+
+### Configure Script Inputs
+
+1. Select a preset or paste a script.
+2. Click **Inspect / Reset Inputs**. The backend compiles and discovers input
+   definitions without executing the script or fetching provider data.
+3. Edit numeric, checkbox, source, enum, text, or option-list controls, then click
+   **Add to Chart**. Without inspection, validated script defaults are used.
+4. To change inputs on an existing indicator, keep its ID and add it again.
+   Failed validation leaves the previously working indicator intact.
+
+Overrides persist during each historical recomputation on new bars. Editing the
+script discards its old input form, and stale inspection responses are ignored.
+Time inputs use Unix milliseconds; colors accept literal color strings, including
+RGBA hex values. This demo does not implement TradingView's chart-click price/time
+pickers or full input-layout/confirmation behavior.
+
+Input metadata must use constants supported by the compiler's pre-execution
+evaluator. For example, use `const string group = "Settings"` for an input group.
+The heatmap sample uses explicit group/option constants and equivalent RGBA
+literal defaults instead of runtime `color.new(...)` calls.
+
+### WebSocket Input Protocol
+
+Existing `add_indicator` and `remove_indicator` requests remain supported.
+`add_indicator.indicator` additionally accepts an `inputs` object keyed by the
+IDs returned by inspection:
+
+```json
+{"type":"inspect_inputs","request_id":"preview-1","indicator":{"id":"ema","name":"EMA","script":"length=input.int(20)\nplot(ta.ema(close,length))"}}
+```
+
+The reply has type `inputs_discovered`, the same `request_id`, and an
+`input_parameters` array (omitted when empty). Inspection errors carry the same
+request ID. Enum option values are qualified names such as `"Side.buy"`; source
+values are identifiers such as `"close"`.
+
+```json
+{"type":"add_indicator","indicator":{"id":"ema","name":"EMA","script":"length=input.int(20)\nplot(ta.ema(close,length))","inputs":{"length":50}}}
 ```
 
 ## Sample Indicators
 
 See the [`indicators/`](./indicators/) directory and the root-level `example.pine` / `example2.pine` scripts for examples. Presets are wired explicitly in [`frontend/src/presets.ts`](./frontend/src/presets.ts); dropping a `.pine` file into the repository does not automatically add it to the UI.
+
+| Preset | Demonstrates |
+| --- | --- |
+| Configurable EMA | Constant input defaults, numeric bounds, and selectable source series |
+| Daily Anchored VWAP | UTC daily anchors and volume-weighted deviation bands |
+| Rank Correlation Index | `ta.rci` with a configurable lookback |
+| Historical SMA Strategy | Native historical orders, explicit zero margins, equity and `[1]` metric snapshots |
 
 ### SMA Crossover
 ```pine
@@ -130,6 +180,32 @@ The demo still uses the same preset → WebSocket → backend evaluation → cha
 3. Registered runtime hooks collect plot output and drawing-object output generically.
 4. The frontend renders captured drawings as an SVG overlay and dashboard table on the price pane.
 
+## Runtime Scope and Limitations
+
+- The data source is a **simulated** one-minute `DEMO` market, not an exchange
+  feed. Bars retain their actual timestamps; gaps are not silently replaced with
+  consecutive minute timestamps. Contract settings are UTC, `USDT`, tick size
+  `0.01`, point value `1`, minimum contract `0.000001`, and a `24x7` regular session.
+- Native strategies use the compiler's limited historical broker and require
+  explicit `margin_long=0, margin_short=0`. Slippage affects fills rather than
+  the chart mark; historical scalar metrics use prior calculation snapshots.
+  New simulated bars trigger full historical recomputation, **not** live-tick
+  rollback, fill-triggered recalculation, or real trading.
+- Strategy output uses explicit `plot(...)` hooks. This demo does not add an
+  order-marker renderer, trade-ledger dashboard, or complete TradingView broker
+  support. Advanced broker/risk options remain explicit runtime errors.
+- Same-context security expressions can use `DEMO`/`"1"`. No cross-context
+  security provider, library resolver, footprint/order-flow provider, or
+  alternate-chart data source is configured here. Scripts needing these
+  capabilities are not silently supplied fake data; missing footprints may
+  return `na` according to the runtime API.
+- Drawing and plotting hooks remain presentation adapters. No algorithm-specific
+  drawing behavior or new blanket argument-binding layer is introduced.
+
+See the compiler's
+[feature reference](https://github.com/woodstock-tokyo/pinescription/blob/000ace7e2b2e2c0a2f5b970f70949995c08a704d/docs/features.md)
+for exact API coverage and unsupported behavior.
+
 ## Supported Functions
 
 | Function | Description |
@@ -150,21 +226,24 @@ The demo still uses the same preset → WebSocket → backend evaluation → cha
 Run the same checks used by the demo integration tests:
 
 ```bash
-# sibling runtime package
-cd ../pinescription
-rtk go test ./...
-
 # demo backend
-cd ../pinescription-demo/backend
-rtk go test ./...
+cd backend
+go test -race ./...
+go vet ./...
 
 # demo frontend
 cd ../frontend
-rtk npm run build
+npm test
+npm run build
 ```
 
-The backend test suite includes coverage for `example2.pine` drawing output, title-independent execution, table dashboard position/size preservation, and `table.clear` handling.
+The backend tests cover input discovery without execution, typed overrides and
+tick persistence, actual timestamps/session boundaries, native strategy history,
+the new presets, WebSocket inspection, and failed replacement safety. Existing
+heatmap/drawing/table regressions remain in place. Frontend tests exercise
+input-value conversion, validation, enum/source round-trips, and stale overrides.
 
 ## License
 
-MIT
+Application code is MIT licensed. `example2.pine` retains its original LuxAlgo
+CC BY-NC-SA 4.0 notice; the input-metadata adaptations do not change that license.

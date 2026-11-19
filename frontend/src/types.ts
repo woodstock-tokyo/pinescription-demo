@@ -93,6 +93,25 @@ export interface IndicatorScript {
   id:     string
   name:   string
   script: string
+  inputs?: InputValues
+}
+
+export type InputValue = string | number | boolean
+export type InputValues = Record<string, InputValue>
+
+export interface ScriptInput {
+  id: string
+  kind: string
+  title: string
+  tooltip?: string
+  group?: string
+  inline?: string
+  default: InputValue
+  options?: { value: InputValue; label: string }[]
+  min?: number
+  max?: number
+  step?: number
+  confirm?: boolean
 }
 
 export type IndicatorPane = 'price' | 'separate'
@@ -104,10 +123,12 @@ export type ServerMsg =
   | { type: 'tick';              bar: Bar; indicator_updates: IndicatorUpdate[] }
   | { type: 'indicator_loaded';  indicator_output: IndicatorOutput }
   | { type: 'indicator_removed'; indicator_id: string }
-  | { type: 'error';             error: string }
+  | { type: 'inputs_discovered'; request_id: string; input_parameters?: ScriptInput[] }
+  | { type: 'error';             error: string; request_id?: string }
 
 // ── Client → Server ──────────────────────────────────────────────────────────
 
 export type ClientMsg =
   | { type: 'add_indicator';    indicator: IndicatorScript }
   | { type: 'remove_indicator'; id: string }
+  | { type: 'inspect_inputs'; request_id: string; indicator: IndicatorScript }

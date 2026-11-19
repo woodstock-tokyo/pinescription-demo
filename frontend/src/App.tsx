@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { WSClient } from './ws'
-import type { Bar, IndicatorPane, IndicatorScript } from './types'
+import type { Bar, IndicatorPane, IndicatorScript, ScriptInput } from './types'
+import { InputControls } from './InputControls'
+import { buildInputValues, defaultInputDrafts } from './inputs'
+import type { InputDrafts } from './inputs'
 import { PRESETS } from './presets'
 import { useChart, getColourMap, hasIndicatorColours } from './useChart'
 
@@ -33,8 +36,24 @@ export default function App() {
   const [formScript,  setFormScript]  = useState(PRESETS[0].script)
   const [sourcePresetId, setSourcePresetId] = useState(PRESETS[0].id)
   const [formError,   setFormError]   = useState('')
+  const [inputParameters, setInputParameters] = useState<ScriptInput[]>([])
+  const [inputDrafts, setInputDrafts] = useState<InputDrafts>({})
+  const [inspectedScript, setInspectedScript] = useState('')
+  const [inspecting, setInspecting] = useState(false)
+  const inspectionCounter = useRef(0)
+  const pendingInspection = useRef<{ id: string; script: string } | null>(null)
+  const scriptRef = useRef(formScript)
+  scriptRef.current = formScript
   const [hiddenInds,  setHiddenInds]  = useState<Record<string, boolean>>({})
   const [, forceRender] = useState(0)
+
+  useEffect(() => {
+    pendingInspection.current = null
+    setInputParameters([])
+    setInputDrafts({})
+    setInspectedScript('')
+    setInspecting(false)
+  }, [formScript])
 
   // ── WebSocket ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -43,7 +62,12 @@ export default function App() {
 
     const off = ws.on((msg) => {
       if (msg.type === '__connected')   { setConnected(true);  return }
-      if (msg.type === '__disconnected'){ setConnected(false); return }
+      if (msg.type === '__disconnected'){
+        setConnected(false)
+        pendingInspection.current = null
+        setInspecting(false)
+        return
+      }
 
       switch (msg.type) {
         case 'history': {
@@ -73,6 +97,7 @@ export default function App() {
             return [...filtered, { id: o.indicator_id, name: o.name, script: '' }]
           })
           forceRender(n => n + 1)
+          setActiveTab('active')
           break
         }
 
@@ -89,9 +114,28 @@ export default function App() {
           break
         }
 
-        case 'error':
-          setFormError(msg.error)
+        case 'inputs_discovered': {
+          const pending = pendingInspection.current
+          if (!pending || msg.request_id !== pending.id || pending.script !== scriptRef.current.trim()) break
+          const parameters = msg.input_parameters ?? []
+          setInputParameters(parameters)
+          setInputDrafts(defaultInputDrafts(parameters))
+          setInspectedScript(pending.script)
+          setInspecting(false)
+          pendingInspection.current = null
           break
+        }
+        case 'error': {
+          if (msg.request_id) {
+            const pending = pendingInspection.current
+            if (!pending || pending.id !== msg.request_id || pending.script !== scriptRef.current.trim()) break
+            pendingInspection.current = null
+            setInspecting(false)
+          }
+          setFormError(msg.error)
+          setActiveTab('add')
+          break
+        }
       }
     })
 
@@ -108,17 +152,34 @@ export default function App() {
     const name   = formName.trim() || id
     const script = formScript.trim()
     if (!script) { setFormError('Script cannot be empty'); return }
+    let inputs = {}
+    try {
+      if (inspectedScript === script) inputs = buildInputValues(inputParameters, inputDrafts)
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : String(error))
+      return
+    }
     if (paneOverride) {
       indicatorPaneRef.current[id] = paneOverride
     } else {
       delete indicatorPaneRef.current[id]
     }
     setFormError('')
-    ws.send({ type: 'add_indicator', indicator: { id, name, script } })
-    setFormId('')
-    setFormName('')
-    setActiveTab('active')
-  }, [formId, formName, formScript, sourcePresetId])
+    ws.send({ type: 'add_indicator', indicator: { id, name, script, inputs } })
+  }, [formId, formName, formScript, inspectedScript, inputParameters, inputDrafts])
+
+  const inspectInputs = useCallback(() => {
+    const script = formScript.trim()
+    if (!script) { setFormError('Script cannot be empty'); return }
+    const id = `inputs-${++inspectionCounter.current}`
+    pendingInspection.current = { id, script }
+    setInspecting(true)
+    setFormError('')
+    wsRef.current?.send({
+      type: 'inspect_inputs', request_id: id,
+      indicator: { id: formId, name: formName, script },
+    })
+  }, [formId, formName, formScript])
 
   const removeIndicator = useCallback((id: string) => {
     wsRef.current?.send({ type: 'remove_indicator', id })
@@ -344,6 +405,20 @@ export default function App() {
               </div>
 
               {formError && <div className="err-msg">⚠ {formError}</div>}
+
+              <button className="btn-add btn-add-secondary" type="button"
+                onClick={inspectInputs} disabled={!connected || inspecting}>
+                {inspecting ? 'Inspecting inputs…' : 'Inspect / Reset Inputs'}
+              </button>
+              <p className="field-hint">
+                Inspect to configure script inputs before execution. Without overrides, validated defaults are used.
+                Reusing an indicator ID replaces it only after successful evaluation.
+              </p>
+              {inspectedScript === formScript.trim() && <>
+                <p className="field-hint">{inputParameters.length} input parameters found.</p>
+                <InputControls parameters={inputParameters} drafts={inputDrafts}
+                  onChange={(id, value) => setInputDrafts(prev => ({ ...prev, [id]: value }))} />
+              </>}
 
               <div className="add-actions">
                 <button
